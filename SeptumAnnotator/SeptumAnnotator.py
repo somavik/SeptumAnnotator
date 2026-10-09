@@ -5,7 +5,6 @@ GUI and the conversion between numpy arrays and Slicer nodes.
 """
 
 import importlib
-import logging
 import os
 
 import ctk
