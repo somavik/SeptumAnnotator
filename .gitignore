@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.nii
+*.nii.gz
+*.nrrd
+*.npz
+manifest.csv
+*_log.json
+build/
