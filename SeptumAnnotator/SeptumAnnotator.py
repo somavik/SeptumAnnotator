@@ -23,7 +23,10 @@ from slicer.util import VTKObservationMixin
 
 import SeptumAnnotatorLib
 from SeptumAnnotatorLib import config as cfg
-from SeptumAnnotatorLib import imaging, manifest, openings, planes, seed, session
+from SeptumAnnotatorLib import manifest, planes, session
+
+# Submodules in dependency order, for "Reload" during development.
+_LIB_MODULES = ("config", "imaging", "manifest", "seed", "planes", "openings", "session")
 
 STRUCTURE_COLORS = {
     "lv": (0.85, 0.25, 0.25), "rv": (0.25, 0.45, 0.9), "la": (0.95, 0.6, 0.6), "ra": (0.6, 0.75, 1.0),
@@ -825,6 +828,13 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def cleanup(self):
         self.removeObservers()
+
+    def onReload(self):
+        """Developer-mode Reload: also reload the core library, not only this file."""
+        importlib.reload(SeptumAnnotatorLib)
+        for name in _LIB_MODULES:
+            importlib.reload(importlib.import_module(f"SeptumAnnotatorLib.{name}"))
+        ScriptedLoadableModuleWidget.onReload(self)
 
 
 #
