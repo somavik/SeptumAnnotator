@@ -1,0 +1,4 @@
+case_id,ct_path,seg_path,seg_source,label_map,seed_strategy,region,skeleton_lv_aorta,skeleton_rv_pa
+synth_00,synth_00_ct.nii.gz,synth_00_seg.nii.gz,gt,imagechd,myocardium,band,synth_00_skeleton_lv_aorta.npz,synth_00_skeleton_rv_pa.npz
+synth_01,synth_01_ct.nii.gz,synth_01_seg.nii.gz,gt,imagechd,myocardium,band,synth_01_skeleton_lv_aorta.npz,synth_01_skeleton_rv_pa.npz
+synth_02,synth_02_ct.nii.gz,synth_02_seg.nii.gz,gt,imagechd,myocardium,band,synth_02_skeleton_lv_aorta.npz,synth_02_skeleton_rv_pa.npz

@@ -1,4 +1,4 @@
-"""Seed generation (protocol §6–7) and the non-destructive edit layers."""
+"""Seed generation (protocol 6–7) and the non-destructive edit layers."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import numpy as np
 
 
 def septal_band(dist_lv: np.ndarray, dist_rv: np.ndarray, d_mm: float) -> np.ndarray:
-    """Voxels within d mm of the LV *and* within d mm of the RV (protocol §6).
+    """Voxels within d mm of the LV *and* within d mm of the RV (protocol 6).
     Distances are signed (negative inside), so chamber voxels next to the septum are included."""
     return (dist_lv <= d_mm) & (dist_rv <= d_mm)
 

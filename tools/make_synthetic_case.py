@@ -1,3 +1,4 @@
+#!/usr/bin/env python.exe
 """Create a small synthetic heart case to try the tool without real data.
 
 Two box-shaped ventricles separated by a myocardium wall (with one VSD hole), an
