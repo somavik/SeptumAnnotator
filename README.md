@@ -1,4 +1,5 @@
 # SeptumAnnotator
+Handmade version
 
 3D Slicer extension for semi-automatic annotation of the interventricular septum on cardiac CT
 (BSc internship, BME MIT). It implements annotation protocol v0.2: automatic seed → outflow planes
