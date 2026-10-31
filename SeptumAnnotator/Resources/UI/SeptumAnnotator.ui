@@ -1,0 +1,742 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>septumAnnotatorWidget</class>
+ <widget class="qMRMLWidget" name="septumAnnotatorWidget">
+  <property name="enabled">
+   <bool>true</bool>
+  </property>
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>836</width>
+    <height>1111</height>
+   </rect>
+  </property>
+  <layout class="QVBoxLayout" name="mainVerticalLayout">
+   <item>
+    <widget class="ctkCollapsibleButton" name="caseCollapsibleButton">
+     <property name="text">
+      <string>Case</string>
+     </property>
+     <property name="collapsed">
+      <bool>true</bool>
+     </property>
+     <property name="contentsFrameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <layout class="QVBoxLayout" name="caseVerticalLayout">
+      <item>
+       <layout class="QFormLayout" name="caseFormLayout">
+        <item row="0" column="0">
+         <widget class="QLabel" name="caseIdLabel">
+          <property name="text">
+           <string>Case ID</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QLineEdit" name="caseIdLineEdit"/>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="ctLabel">
+          <property name="text">
+           <string>CT</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="ctkPathLineEdit" name="ctPathLineEdit">
+          <property name="autoFillBackground">
+           <bool>false</bool>
+          </property>
+          <property name="filters">
+           <set>ctkPathLineEdit::Executable|ctkPathLineEdit::Files|ctkPathLineEdit::Readable</set>
+          </property>
+          <property name="nameFilters">
+           <stringlist>
+            <string>Images (*.nii *.gz *.nrrd)</string>
+           </stringlist>
+          </property>
+         </widget>
+        </item>
+        <item row="2" column="0">
+         <widget class="QLabel" name="segmentationLabel">
+          <property name="text">
+           <string>Segmentation</string>
+          </property>
+         </widget>
+        </item>
+        <item row="2" column="1">
+         <widget class="ctkPathLineEdit" name="segmentationPathLineEdit"/>
+        </item>
+        <item row="3" column="0">
+         <widget class="QLabel" name="labelConfigLabel">
+          <property name="text">
+           <string>Label Config</string>
+          </property>
+         </widget>
+        </item>
+        <item row="3" column="1">
+         <widget class="ctkPathLineEdit" name="labelConfigPathLineEdit">
+          <property name="filters">
+           <set>ctkPathLineEdit::Files|ctkPathLineEdit::Readable</set>
+          </property>
+          <property name="nameFilters">
+           <stringlist>
+            <string>LabelMaps(*.json)</string>
+           </stringlist>
+          </property>
+         </widget>
+        </item>
+        <item row="4" column="0">
+         <widget class="QLabel" name="lvAortaSkeletonLabel">
+          <property name="text">
+           <string>Skeleton LV - Aorta</string>
+          </property>
+         </widget>
+        </item>
+        <item row="4" column="1">
+         <widget class="ctkPathLineEdit" name="lvAortaSkeletonPathLineEdit">
+          <property name="nameFilters">
+           <stringlist>
+            <string>Frames(*.npz)</string>
+           </stringlist>
+          </property>
+         </widget>
+        </item>
+        <item row="5" column="0">
+         <widget class="QLabel" name="rvPaSkeletonLabel">
+          <property name="text">
+           <string>Skeleton RV - PA</string>
+          </property>
+         </widget>
+        </item>
+        <item row="5" column="1">
+         <widget class="ctkPathLineEdit" name="rvPaSkeletonPathLineEdit">
+          <property name="nameFilters">
+           <stringlist>
+            <string>Frames(*.npz)</string>
+           </stringlist>
+          </property>
+         </widget>
+        </item>
+        <item row="6" column="0">
+         <widget class="QLabel" name="generateSkeletonLabel">
+          <property name="text">
+           <string>Generate Skeleton</string>
+          </property>
+         </widget>
+        </item>
+        <item row="6" column="1">
+         <widget class="ctkCheckBox" name="generateSkeletonCheckBox"/>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QPushButton" name="loadCaseButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Run the algorithm.</string>
+        </property>
+        <property name="text">
+         <string>Load Case</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="seedCollapsibleButton">
+     <property name="enabled">
+      <bool>true</bool>
+     </property>
+     <property name="text">
+      <string>Seed</string>
+     </property>
+     <property name="collapsed">
+      <bool>true</bool>
+     </property>
+     <property name="contentsFrameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <layout class="QVBoxLayout" name="seedVerticalLayout">
+      <item>
+       <layout class="QFormLayout" name="seedStrategyFormLayout">
+        <item row="0" column="0">
+         <widget class="QLabel" name="seedStrategyLabel">
+          <property name="text">
+           <string>Seed Strategy</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="ctkComboBox" name="seedStrategyComboBox">
+          <item>
+           <property name="text">
+            <string>myocardium</string>
+           </property>
+          </item>
+          <item>
+           <property name="text">
+            <string>sheetness</string>
+           </property>
+          </item>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QPushButton" name="loadSeedButton">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="text">
+         <string>Load Seed</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QFormLayout" name="seedParametersFormLayout">
+        <item row="0" column="0">
+         <widget class="QLabel" name="regionLabel">
+          <property name="text">
+           <string>Region</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="ctkComboBox" name="regionComboBox">
+          <item>
+           <property name="text">
+            <string>hull</string>
+           </property>
+          </item>
+          <item>
+           <property name="text">
+            <string>band</string>
+           </property>
+          </item>
+         </widget>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="bandWidthLabel">
+          <property name="text">
+           <string>Band Width</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="ctkSliderWidget" name="bandWidthSliderWidget">
+          <property name="minimum">
+           <double>0.500000000000000</double>
+          </property>
+          <property name="maximum">
+           <double>20.000000000000000</double>
+          </property>
+         </widget>
+        </item>
+        <item row="2" column="0">
+         <widget class="QLabel" name="thresholdLabel">
+          <property name="text">
+           <string>Threshold</string>
+          </property>
+         </widget>
+        </item>
+        <item row="2" column="1">
+         <widget class="ctkSliderWidget" name="thresholdSliderWidget">
+          <property name="minimum">
+           <double>0.100000000000000</double>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="planesCollapsibleButton">
+     <property name="text">
+      <string>Planes</string>
+     </property>
+     <property name="contentsFrameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <layout class="QVBoxLayout" name="planesVerticalLayout">
+      <item>
+       <widget class="ctkCollapsibleButton" name="lvAortaCollapsibleButton">
+        <property name="text">
+         <string>Left ventricle - Aorta</string>
+        </property>
+        <property name="contentsFrameShape">
+         <enum>QFrame::StyledPanel</enum>
+        </property>
+        <layout class="QVBoxLayout" name="lvAortaVerticalLayout">
+         <item>
+          <layout class="QFormLayout" name="lvAortaModeFormLayout">
+           <item row="0" column="0">
+            <widget class="QLabel" name="lvAortaModeLabel">
+             <property name="text">
+              <string>Mode:</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="ctkComboBox" name="lvAortaModeComboBox">
+             <item>
+              <property name="text">
+               <string>skeleton</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>free hand</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>no connection</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="lvAortaInfoLabel">
+           <property name="text">
+            <string>Info</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QWidget" name="lvAortaIndexWidget" native="true">
+           <layout class="QVBoxLayout" name="lvAortaIndexVerticalLayout">
+            <item>
+             <layout class="QFormLayout" name="lvAortaIndexFormLayout">
+              <item row="0" column="0">
+               <widget class="QLabel" name="lvAortaIndexLabel">
+                <property name="text">
+                 <string>LV - Aorta Index:</string>
+                </property>
+               </widget>
+              </item>
+              <item row="0" column="1">
+               <widget class="ctkSliderWidget" name="lvAortaIndexSliderWidget">
+                <property name="decimals">
+                 <number>0</number>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="lvAortaUpperIndexHorizontalLayout">
+              <item>
+               <widget class="QPushButton" name="lvAortaStartAtMaxButton">
+                <property name="text">
+                 <string>Start at MAX</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="lvAortaSetUpperButton">
+                <property name="text">
+                 <string>Set upper</string>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="lvAortaLowerIndexHorizontalLayout">
+              <item>
+               <widget class="QPushButton" name="lvAortaStartAtMinButton">
+                <property name="text">
+                 <string>Start at MIN</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="lvAortaSetLowerButton">
+                <property name="text">
+                 <string>Set lower</string>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPushButton" name="lvAortaResetButton">
+              <property name="text">
+               <string>Reset</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item>
+          <widget class="QWidget" name="lvAortaTiltWidget" native="true">
+           <layout class="QVBoxLayout" name="lvAortaTiltVerticalLayout">
+            <item>
+             <layout class="QFormLayout" name="lvAortaTiltFormLayout">
+              <item row="0" column="0">
+               <widget class="QLabel" name="lvAortaTiltOverrideLabel">
+                <property name="text">
+                 <string>Tilt override</string>
+                </property>
+               </widget>
+              </item>
+              <item row="0" column="1">
+               <widget class="QCheckBox" name="lvAortaTiltOverrideCheckBox"/>
+              </item>
+              <item row="1" column="1">
+               <widget class="ctkSliderWidget" name="lvAortaTiltAngleASliderWidget">
+                <property name="enabled">
+                 <bool>false</bool>
+                </property>
+                <property name="decimals">
+                 <number>1</number>
+                </property>
+                <property name="minimum">
+                 <double>-90.000000000000000</double>
+                </property>
+                <property name="maximum">
+                 <double>90.000000000000000</double>
+                </property>
+               </widget>
+              </item>
+              <item row="2" column="0">
+               <widget class="QLabel" name="lvAortaTiltAngleBLabel">
+                <property name="text">
+                 <string>Tilt angle b:</string>
+                </property>
+               </widget>
+              </item>
+              <item row="2" column="1">
+               <widget class="ctkSliderWidget" name="lvAortaTiltAngleBSliderWidget">
+                <property name="enabled">
+                 <bool>false</bool>
+                </property>
+                <property name="decimals">
+                 <number>1</number>
+                </property>
+                <property name="minimum">
+                 <double>-90.000000000000000</double>
+                </property>
+                <property name="maximum">
+                 <double>90.000000000000000</double>
+                </property>
+               </widget>
+              </item>
+              <item row="1" column="0">
+               <widget class="QLabel" name="lvAortaTiltAngleALabel">
+                <property name="text">
+                 <string>Tilt angle a:</string>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item>
+          <widget class="QWidget" name="lvAortaFreeHandWidget" native="true">
+           <layout class="QVBoxLayout" name="lvAortaFreeHandVerticalLayout">
+            <item>
+             <widget class="QPushButton" name="lvAortaApplyMarkupPlaneButton">
+              <property name="text">
+               <string>Apply markup plane</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item>
+          <layout class="QFormLayout" name="lvAortaLockFormLayout">
+           <item row="0" column="0">
+            <widget class="QLabel" name="lvAortaLockLabel">
+             <property name="text">
+              <string>Lock</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="QCheckBox" name="lvAortaLockCheckBox"/>
+           </item>
+          </layout>
+         </item>
+        </layout>
+       </widget>
+      </item>
+      <item>
+       <widget class="ctkCollapsibleButton" name="rvPaCollapsibleButton">
+        <property name="text">
+         <string>Right ventricle - Pulmonary artery</string>
+        </property>
+        <property name="contentsFrameShape">
+         <enum>QFrame::StyledPanel</enum>
+        </property>
+        <layout class="QVBoxLayout" name="rvPaVerticalLayout">
+         <item>
+          <layout class="QFormLayout" name="rvPaModeFormLayout">
+           <item row="0" column="0">
+            <widget class="QLabel" name="rvPaModeLabel">
+             <property name="text">
+              <string>Mode:</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="ctkComboBox" name="rvPaModeComboBox">
+             <item>
+              <property name="text">
+               <string>skeleton</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>free hand</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>no connection</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="rvPaInfoLabel">
+           <property name="text">
+            <string>Info</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QWidget" name="rvPaIndexWidget" native="true">
+           <layout class="QVBoxLayout" name="rvPaIndexVerticalLayout">
+            <item>
+             <layout class="QFormLayout" name="rvPaIndexFormLayout">
+              <item row="0" column="0">
+               <widget class="QLabel" name="rVPAIndexLabel">
+                <property name="text">
+                 <string>RV - PA Index:</string>
+                </property>
+               </widget>
+              </item>
+              <item row="0" column="1">
+               <widget class="ctkSliderWidget" name="rvPaIndexSliderWidget">
+                <property name="decimals">
+                 <number>0</number>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="rvPaUpperIndexHorizontalLayout">
+              <item>
+               <widget class="QPushButton" name="rvPaStartAtMaxButton">
+                <property name="text">
+                 <string>Start at MAX</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="rvPaSetUpperButton">
+                <property name="text">
+                 <string>Set upper</string>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="rvPaLowerIndexHorizontalLayout">
+              <item>
+               <widget class="QPushButton" name="rvPaStartAtMinButton">
+                <property name="text">
+                 <string>Start at MIN</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="rvPaSetLowerButton">
+                <property name="text">
+                 <string>Set lower</string>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPushButton" name="rvPaResetButton">
+              <property name="text">
+               <string>Reset</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item>
+          <widget class="QWidget" name="rvPaTiltWidget" native="true">
+           <layout class="QVBoxLayout" name="rvPaTiltVerticalLayout">
+            <item>
+             <layout class="QFormLayout" name="rvPaTiltFormLayout">
+              <item row="0" column="0">
+               <widget class="QLabel" name="rvPaTiltOverrideLabel">
+                <property name="text">
+                 <string>Tilt override</string>
+                </property>
+               </widget>
+              </item>
+              <item row="0" column="1">
+               <widget class="QCheckBox" name="rvPaTiltOverrideCheckBox"/>
+              </item>
+              <item row="1" column="0">
+               <widget class="QLabel" name="rvPaTiltAngleALabel">
+                <property name="text">
+                 <string>Tilt angle a:</string>
+                </property>
+               </widget>
+              </item>
+              <item row="1" column="1">
+               <widget class="ctkSliderWidget" name="rvPaTiltAngleASliderWidget">
+                <property name="enabled">
+                 <bool>false</bool>
+                </property>
+                <property name="decimals">
+                 <number>1</number>
+                </property>
+                <property name="minimum">
+                 <double>-90.000000000000000</double>
+                </property>
+                <property name="maximum">
+                 <double>90.000000000000000</double>
+                </property>
+               </widget>
+              </item>
+              <item row="2" column="0">
+               <widget class="QLabel" name="rvPaTiltAngleBLabel">
+                <property name="text">
+                 <string>Tilt angle b:</string>
+                </property>
+               </widget>
+              </item>
+              <item row="2" column="1">
+               <widget class="ctkSliderWidget" name="rvPaTiltAngleBSliderWidget">
+                <property name="enabled">
+                 <bool>false</bool>
+                </property>
+                <property name="decimals">
+                 <number>1</number>
+                </property>
+                <property name="minimum">
+                 <double>-90.000000000000000</double>
+                </property>
+                <property name="maximum">
+                 <double>90.000000000000000</double>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item>
+          <widget class="QWidget" name="rvPaFreeHandWidget" native="true">
+           <layout class="QVBoxLayout" name="rvPaFreeHandVerticalLayout">
+            <item>
+             <widget class="QPushButton" name="rvPaApplyMarkupPlaneButton">
+              <property name="text">
+               <string>Apply markup plane</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item>
+          <layout class="QFormLayout" name="rvPaLockFormLayout">
+           <item row="0" column="0">
+            <widget class="QLabel" name="rvPaLockLabel">
+             <property name="text">
+              <string>Lock</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="QCheckBox" name="rvPaLockCheckBox"/>
+           </item>
+          </layout>
+         </item>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>40</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>ctkCheckBox</class>
+   <extends>QCheckBox</extends>
+   <header>ctkCheckBox.h</header>
+  </customwidget>
+  <customwidget>
+   <class>ctkCollapsibleButton</class>
+   <extends>QWidget</extends>
+   <header>ctkCollapsibleButton.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>ctkComboBox</class>
+   <extends>QComboBox</extends>
+   <header>ctkComboBox.h</header>
+  </customwidget>
+  <customwidget>
+   <class>ctkPathLineEdit</class>
+   <extends>QWidget</extends>
+   <header>ctkPathLineEdit.h</header>
+  </customwidget>
+  <customwidget>
+   <class>ctkSliderWidget</class>
+   <extends>QWidget</extends>
+   <header>ctkSliderWidget.h</header>
+  </customwidget>
+  <customwidget>
+   <class>qMRMLWidget</class>
+   <extends>QWidget</extends>
+   <header>qMRMLWidget.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
