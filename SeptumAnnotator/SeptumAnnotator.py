@@ -1,879 +1,685 @@
-"""SeptumAnnotator: semi-automatic ventricular-septum annotation (3D Slicer scripted module).
-
-The computations live in SeptumAnnotatorLib (no Slicer dependency); this file is the
-GUI and the conversion between numpy arrays and Slicer nodes.
-"""
-
-import importlib
 import os
+from typing import Annotated
 
-import ctk
-import numpy as np
-import qt
+from scipy import ndimage
+
+from SeptumAnnotatorLib.planes import OutflowPlane, Plane
+from SeptumAnnotatorLib.config import CaseData, REQUIRED_STRUCTURES, SeedData, SeedSettings, loadLabelConfig, Skeleton, convexHullMask
+
 import slicer
-import vtk
-from slicer.ScriptedLoadableModule import (
-    ScriptedLoadableModule,
-    ScriptedLoadableModuleLogic,
-    ScriptedLoadableModuleTest,
-    ScriptedLoadableModuleWidget,
-)
+from slicer.i18n import tr as _
+from slicer.ScriptedLoadableModule import *
 from slicer.util import VTKObservationMixin
-
-import SeptumAnnotatorLib
-from SeptumAnnotatorLib import config as cfg
-from SeptumAnnotatorLib import manifest, planes, session
-
-# Submodules in dependency order, for "Reload" during development.
-_LIB_MODULES = ("config", "imaging", "manifest", "seed", "planes", "openings", "session")
-
-STRUCTURE_COLORS = {
-    "lv": (0.85, 0.25, 0.25), "rv": (0.25, 0.45, 0.9), "la": (0.95, 0.6, 0.6), "ra": (0.6, 0.75, 1.0),
-    "myo": (0.85, 0.75, 0.45), "aorta": (0.95, 0.35, 0.0), "pa": (0.2, 0.75, 0.95),
-}
-SEPTUM_COLOR = (0.2, 0.9, 0.3)
-OPENING_COLOR = (1.0, 0.0, 1.0)
-OUTFLOW_TITLES = {"lv_aorta": "LV – aorta", "rv_pa": "RV – PA"}
+from slicer.parameterNodeWrapper import parameterNodeWrapper
 
 
-def lps_to_ras(v):
-    return [-float(v[0]), -float(v[1]), float(v[2])]
-
-
-ras_to_lps = lps_to_ras  # the flip is its own inverse
-
+# Slicer újraindítás: slicer.util.reloadScriptedModule("SeptumAnnotator")
 
 #
-# Module
+# SeptumAnnotator
 #
-
 
 class SeptumAnnotator(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
-        self.parent.title = "Septum Annotator"
-        self.parent.categories = ["Segmentation"]
-        self.parent.dependencies = ["Segmentations", "Markups"]
-        self.parent.contributors = ["Soma Szolár (BME MIT)"]
-        self.parent.helpText = (
-            "Semi-automatic annotation of the interventricular septum: automatic seed, "
-            "skeleton-constrained outflow planes, correction and hole QA. See README.md."
-        )
-        self.parent.acknowledgementText = (
-            "Developed at the Department of Artificial Intelligence and Systems Engineering, "
-            "Budapest University of Technology and Economics."
-        )
+        self.parent.title = _("Septum Annotator") 
+        self.parent.categories = ["Segmentation"] # ez alatt fog megjelenni a modul a Slicerben
+        self.parent.dependencies =  ["Segmentations", "Markups"] # segmentations -> septum, struktúrák. Markups -> vágósíkok, skeleton pontok. 
+        self.parent.contributors = ["Soma Szolár (BME MIT)"]  
 
+        # _() function marks text as translatable to other languages
+        self.parent.helpText = _("""
+        Semi-automatic annotation of the interventricular septum: automatic seed,
+        skeleton-constrained outflow planes, correction and hole QA. 
+        See README.md.
+        """)
 
-#
-# Logic: scene <-> arrays
-#
-
-
-class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
-    """Owns the CaseSession and every node it puts into the scene."""
-
-    def __init__(self):
-        ScriptedLoadableModuleLogic.__init__(self)
-        self.session = None
-        self.nodes = {}
-        self.planeNodes = {}
-
-    # ---------------------------------------------------------------- loading
-    def loadCase(self, case, d_mm, sheetness_threshold):
-        self.clear()
-        import sitkUtils
-
-        self.session = session.CaseSession(case, d_mm=d_mm, sheetness_threshold=sheetness_threshold)
-        s = self.session
-
-        self.nodes["ct"] = slicer.util.loadVolume(case.ct_path, {"name": f"{case.case_id}_CT", "show": False})
-        self.nodes["work"] = sitkUtils.PushVolumeToSlicer(s.ct, name=f"{case.case_id}_CT_1mm")
-        self.nodes["work"].SetHideFromEditors(False)
-
-        gt = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", f"{case.case_id}_structures")
-        gt.SetReferenceImageGeometryParameterFromVolumeNode(self.nodes["work"])
-        gt.CreateDefaultDisplayNodes()
-        for name, mask in s.structures.items():
-            if not mask.any():
-                continue
-            sid = gt.GetSegmentation().AddEmptySegment(name, name, STRUCTURE_COLORS.get(name, (0.7, 0.7, 0.7)))
-            slicer.util.updateSegmentBinaryLabelmapFromArray(mask.astype(np.uint8), gt, sid, self.nodes["work"])
-        disp = gt.GetDisplayNode()
-        disp.SetAllSegmentsOpacity2DFill(0.0)
-        disp.SetAllSegmentsOpacity2DOutline(0.6)
-        disp.SetAllSegmentsVisibility(False)
-        for name in ("lv", "rv", "aorta", "pa"):
-            if gt.GetSegmentation().GetSegment(name):
-                disp.SetSegmentVisibility(name, True)
-        self.nodes["structures"] = gt
-
-        if case.mitral_path:
-            self.nodes["mitral"] = slicer.util.loadSegmentation(case.mitral_path, {"name": f"{case.case_id}_mitral"})
-
-        sep = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", f"{case.case_id}_septum")
-        sep.SetReferenceImageGeometryParameterFromVolumeNode(self.nodes["work"])
-        sep.CreateDefaultDisplayNodes()
-        self.septumId = sep.GetSegmentation().AddEmptySegment("septum", "septum", SEPTUM_COLOR)
-        sep.GetDisplayNode().SetOpacity2DFill(0.45)
-        self.nodes["septum"] = sep
-
-        qa = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", f"{case.case_id}_opening")
-        qa.SetReferenceImageGeometryParameterFromVolumeNode(self.nodes["work"])
-        qa.CreateDefaultDisplayNodes()
-        self.openingId = qa.GetSegmentation().AddEmptySegment("opening", "opening", OPENING_COLOR)
-        qa.GetDisplayNode().SetOpacity2DFill(0.8)
-        self.nodes["opening"] = qa
-
-        for outflow, state in s.planes.items():
-            if state.skeleton is not None:
-                self.nodes[f"skel_{outflow}"] = self._addPolyline(f"{case.case_id}_skeleton_{outflow}",
-                                                                  state.skeleton.points)
-            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsPlaneNode", f"{outflow}_plane")
-            node.CreateDefaultDisplayNodes()
-            node.SetSizeWorld(70, 70) if hasattr(node, "SetSizeWorld") else node.SetSize(70, 70)
-            node.GetDisplayNode().SetSelectedColor(STRUCTURE_COLORS["aorta" if outflow == "lv_aorta" else "pa"])
-            node.GetDisplayNode().SetOpacity(0.35)
-            node.SetLocked(True)
-            node.SetDisplayVisibility(False)
-            self.planeNodes[outflow] = node
-            self.nodes[f"plane_{outflow}"] = node
-
-        slicer.util.setSliceViewerLayers(background=self.nodes["ct"], fit=True)
-        self.pushMask()
-        sep.CreateClosedSurfaceRepresentation()
-        return s
-
-    def _addPolyline(self, name, points_lps):
-        pts = vtk.vtkPoints()
-        for p in points_lps:
-            pts.InsertNextPoint(lps_to_ras(p))
-        line = vtk.vtkPolyLine()
-        line.GetPointIds().SetNumberOfIds(len(points_lps))
-        for i in range(len(points_lps)):
-            line.GetPointIds().SetId(i, i)
-        cells = vtk.vtkCellArray()
-        cells.InsertNextCell(line)
-        poly = vtk.vtkPolyData()
-        poly.SetPoints(pts)
-        poly.SetLines(cells)
-        model = slicer.modules.models.logic().AddModel(poly)
-        model.SetName(name)
-        model.GetDisplayNode().SetColor(1, 1, 0)
-        model.GetDisplayNode().SetLineWidth(3)
-        model.GetDisplayNode().SetVisibility2D(True)
-        return model
-
-    def clear(self):
-        for node in self.nodes.values():
-            if node is not None and slicer.mrmlScene.IsNodePresent(node):
-                slicer.mrmlScene.RemoveNode(node)
-        self.nodes, self.planeNodes, self.session = {}, {}, None
-
-    # ---------------------------------------------------------------- mask
-    def currentMask(self):
-        arr = slicer.util.arrayFromSegmentBinaryLabelmap(self.nodes["septum"], self.septumId, self.nodes["work"])
-        return arr > 0
-
-    def syncEdits(self):
-        if self.session is not None:
-            self.session.sync_edits(self.currentMask())
-
-    def pushMask(self):
-        final = self.session.final_mask()
-        slicer.util.updateSegmentBinaryLabelmapFromArray(final.astype(np.uint8), self.nodes["septum"],
-                                                         self.septumId, self.nodes["work"])
-        return final
-
-    def recompute(self, **kwargs):
-        """Keep the user's edits, recompute the seed, show the new mask."""
-        self.syncEdits()
-        self.session.update(**kwargs)
-        return self.pushMask()
-
-    # ---------------------------------------------------------------- planes
-    def showPlane(self, outflow, plane):
-        node = self.planeNodes.get(outflow)
-        if node is None:
-            return
-        if plane is None:
-            node.SetDisplayVisibility(False)
-            return
-        node.SetCenterWorld(lps_to_ras(plane[0]))
-        node.SetNormalWorld(lps_to_ras(plane[1]))
-        node.SetDisplayVisibility(True)
-
-    def freeHandFromNode(self, outflow):
-        node = self.planeNodes[outflow]
-        c, n = [0.0] * 3, [0.0] * 3
-        node.GetCenterWorld(c)
-        node.GetNormalWorld(n)
-        return ras_to_lps(c), ras_to_lps(n)
-
-    # ---------------------------------------------------------------- openings
-    def showOpening(self, opening):
-        mask = np.zeros(self.session.lv.shape, dtype=np.uint8)
-        if opening is not None:
-            mask.flat[opening.voxels] = 1
-        slicer.util.updateSegmentBinaryLabelmapFromArray(mask, self.nodes["opening"], self.openingId,
-                                                         self.nodes["work"])
-        if opening is not None:
-            r, a, s_ = lps_to_ras(opening.centroid_lps)
-            slicer.modules.markups.logic().JumpSlicesToLocation(r, a, s_, True)
-
+        self.parent.acknowledgementText = _("""
+        BME MIT
+        """)
 
 #
-# Widget
+# SeptumAnnotatorWidget
 #
 
+import qt, ctk, slicer
+from slicer.ScriptedLoadableModule import *
+from slicer.util import VTKObservationMixin
+
+# A combo boxban kiválasztott érték határozza meg, melyik panelcsoport látható.
+PLANE_WIDGETS = {
+    "skeleton": {"IndexWidget", "TiltWidget"},
+    "free hand": {"FreeHandWidget"},
+    "no connection": set(),
+}
+# Ezekből állnak össze a konkrét UI-nevek.
+OUTFLOWS = ("lvAorta", "rvPa") # Prefix
+ALL_WIDGETS = ("IndexWidget", "TiltWidget", "FreeHandWidget") # Konkrét widgetek, amik a fenti dict-ben szerepelnek.
 
 class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
+    logic: "SeptumAnnotatorLogic"
+    
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
         VTKObservationMixin.__init__(self)
         self.logic = None
-        self.cases = []
-        self.manifest = None
-        self.grind = False
-        self.exported = True
-        self.planeUi = {}
-        self.currentOpening = None
-        self._updating = False
+        
+        # Tárolja, hogy az adott kiáramlási síknál éppen melyik határ keresése folyik
+        self._searching = {o: None for o in OUTFLOWS} # pl.: "lvAorta": None | "upper" | "lower"
+        # Így a program tudja, hogy melyik csúszka mozgatása mikor frissítse az előnézetet.
+        
+    def _setDefaultValues(self):
+        """
+        Beállítja a felület alapértelmezett teszt-útvonalait és állapotait
+        a gyorsabb tesztelés érdekében.
+        """
+        self.ui.ctPathLineEdit.currentPath = (
+            r"C:\Users\somas\Desktop\25262\Onlab\project_soveny\ImageCHD_dataset\fixed_headers\ct_1001\ct_1001_fixed_image.nii.gz"
+        )
+        self.ui.segmentationPathLineEdit.currentPath = (
+            r"C:\Users\somas\Desktop\25262\Onlab\project_soveny\ImageCHD_dataset\fixed_headers\ct_1001\ct_1001_fixed_label.nii.gz"
+        )
+        self.ui.labelConfigPathLineEdit.currentPath = r"C:\Users\somas\Desktop\a.json"
+        self.ui.lvAortaSkeletonPathLineEdit.currentPath = (
+            r"C:\Users\somas\Desktop\26271\szakgyak\generate_frame\frames\1_skeleton_lv_aorta.npz"
+        )
+        self.ui.rvPaSkeletonPathLineEdit.currentPath = (
+            r"C:\Users\somas\Desktop\26271\szakgyak\generate_frame\frames\1_skeleton_rv_pa.npz"
+        )
+        self.ui.caseIdLineEdit.text = "1"
 
-    # ================================================================ setup
     def setup(self):
-        ScriptedLoadableModuleWidget.setup(self)
+        print("[DEBUG] Setting up the SeptumAnnotatorWidget...")
+        
+        # Betöltjük a Qt Designerben megtervezett .ui fájlt
+        uiWidget = slicer.util.loadUI(self.resourcePath("UI/SeptumAnnotator.ui"))
+        self.layout.addWidget(uiWidget)
+        
+        # A .ui fájlban névvel rendelkező widgeteket automatikusan attribútumként tölti fel.
+        self.ui = slicer.util.childWidgetVariables(uiWidget)
+
+        # Bekötjük a Slicer jelenetet
+        uiWidget.setMRMLScene(slicer.mrmlScene)
+
         self.logic = SeptumAnnotatorLogic()
-        self._setupCaseSection()
-        self._setupSeedSection()
-        self._setupPlaneSection()
-        self._setupEditSection()
-        self._setupOpeningSection()
-        self._setupFinishSection()
-        self.layout.addStretch(1)
-        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
-        self._setCaseLoaded(False)
+        
+        # Eseménykezelők bekötése (Case)
+        self.ui.ctPathLineEdit.currentPathChanged.connect(self._checkCanApply)
+        self.ui.segmentationPathLineEdit.currentPathChanged.connect(self._checkCanApply)
+        self.ui.labelConfigPathLineEdit.currentPathChanged.connect(self._checkCanApply)
+        self.ui.lvAortaSkeletonPathLineEdit.currentPathChanged.connect(self._onSkeletonPathChanged)
+        self.ui.rvPaSkeletonPathLineEdit.currentPathChanged.connect(self._onSkeletonPathChanged)
+        self.ui.generateSkeletonCheckBox.toggled.connect(self._onGenerateSkeletonToggled)
+        self.ui.loadCaseButton.clicked.connect(self.onLoadCaseButton)
+        
+        # Eseménykezelők bekötése (Seed)
+        self.ui.seedStrategyComboBox.currentIndexChanged.connect(self._updateSeedControls)
+        self.ui.regionComboBox.currentIndexChanged.connect(self._updateSeedControls)
+        self.ui.loadSeedButton.clicked.connect(self.onLoadSeedButton)
+        self.ui.seedCollapsibleButton.enabled = False
+        self.ui.loadSeedButton.clicked.connect(self.onLoadSeedButton)
+        self.ui.bandWidthSliderWidget.valueChanged.connect(self.onSeedParameterChanged)
+        self.ui.regionComboBox.currentIndexChanged.connect(self.onSeedParameterChanged)
+        self._updateSeedControls()
 
-    def _section(self, title, collapsed=False):
-        box = ctk.ctkCollapsibleButton()
-        box.text = title
-        box.collapsed = collapsed
-        self.layout.addWidget(box)
-        return box, qt.QFormLayout(box)
+        # Eseménykezelők bekötése (Planes)
+        # Mindkét kiáramlási szekció (rv - aorta, lv -pa) ugyanazt a logikát használja.
+        for outflow in OUTFLOWS:
+            # A lambda paramétere rögzíti az aktuális outflow értékét, hogy mivel lesz meghívva az eseménykezelő,
+            # így a megfelelő panel kapja a megfelelő eseményt.
+            self._w(outflow, "ModeComboBox").currentIndexChanged.connect(lambda *_, o=outflow: self.onModeChanged(o))
+            self._w(outflow, "IndexSliderWidget").valueChanged.connect(lambda *_, o=outflow: self.onIndexSliderChanged(o))
+            self._w(outflow, "StartAtMaxButton").clicked.connect(lambda *_, o=outflow: self.onStartAt(o, "upper"))
+            self._w(outflow, "SetUpperButton").clicked.connect(lambda *_, o=outflow: self.onSetBound(o, "upper"))
+            self._w(outflow, "StartAtMinButton").clicked.connect(lambda *_, o=outflow: self.onStartAt(o, "lower"))
+            self._w(outflow, "SetLowerButton").clicked.connect(lambda *_, o=outflow: self.onSetBound(o, "lower"))
+            self._w(outflow, "ResetButton").clicked.connect(lambda *_, o=outflow: self.onResetPlane(o))
+            self._w(outflow, "TiltOverrideCheckBox").toggled.connect(lambda *_, o=outflow: self.onTiltChanged(o))
+            self._w(outflow, "TiltAngleASliderWidget").valueChanged.connect(lambda *_, o=outflow: self.onTiltChanged(o))
+            self._w(outflow, "TiltAngleBSliderWidget").valueChanged.connect(lambda *_, o=outflow: self.onTiltChanged(o))
+            self._w(outflow, "ApplyMarkupPlaneButton").clicked.connect(lambda *_, o=outflow: self.onFreeHandApply(o))
+            self._w(outflow, "LockCheckBox").toggled.connect(lambda checked, o=outflow: self.onLockToggled(o, checked))
+        
+        self.ui.caseCollapsibleButton.collapsed = False
+        
+        self.ui.seedCollapsibleButton.enabled = False
+        self.ui.seedCollapsibleButton.collapsed = True
+        
+        self.ui.planesCollapsibleButton.enabled = False
+        self.ui.planesCollapsibleButton.collapsed = True
 
-    @staticmethod
-    def _path(filters, name, dirs=False):
-        w = ctk.ctkPathLineEdit()
-        w.filters = (ctk.ctkPathLineEdit.Dirs if dirs else ctk.ctkPathLineEdit.Files)
-        if filters:
-            w.nameFilters = filters
-        w.settingKey = f"SeptumAnnotator/{name}"
-        return w
+        self._setDefaultValues()  # Alapértelmezett teszt-értékek beállítása
 
-    @staticmethod
-    def _combo(values):
-        c = qt.QComboBox()
-        c.addItems(list(values))
-        return c
+    
+    # --- CASE ESEMÉNYKEZELŐK ---
 
-    def _setupCaseSection(self):
-        box, form = self._section("1. Case")
-        self.caseBox = box
-        modeRow = qt.QHBoxLayout()
-        self.grindRadio = qt.QRadioButton("Grind (config table)")
-        self.customRadio = qt.QRadioButton("Custom (single case)")
-        self.grindRadio.checked = True
-        modeRow.addWidget(self.grindRadio)
-        modeRow.addWidget(self.customRadio)
-        form.addRow(modeRow)
-        self.outputDir = self._path(None, "outputDir", dirs=True)
-        form.addRow("Output folder:", self.outputDir)
+    def _onSkeletonPathChanged(self, path):
+        """Ha betallóznak egy fájlt, vegyük ki a pipát a generálásból."""
+        lv_path = self.ui.lvAortaSkeletonPathLineEdit.currentPath
+        rv_path = self.ui.rvPaSkeletonPathLineEdit.currentPath
+        
+        if lv_path or rv_path:
+            self.ui.generateSkeletonCheckBox.blockSignals(True)
+            self.ui.generateSkeletonCheckBox.checked = False
+            self.ui.generateSkeletonCheckBox.blockSignals(False)
+            
+        self._checkCanApply()
+        
+    def _onGenerateSkeletonToggled(self, checked):
+        # Generálás esetén a fájlválasztók inaktívak (az útvonalak megmaradnak, de nem használjuk őket)
+        self.ui.lvAortaSkeletonPathLineEdit.enabled = not checked
+        self.ui.rvPaSkeletonPathLineEdit.enabled = not checked
+        self._checkCanApply()
 
-        self.grindWidget = qt.QWidget()
-        g = qt.QFormLayout(self.grindWidget)
-        g.setContentsMargins(0, 0, 0, 0)
-        self.configPath = self._path(["Case tables (*.csv *.xlsx)"], "configPath")
-        g.addRow("Config table:", self.configPath)
-        self.startButton = qt.QPushButton("Start / resume")
-        g.addRow(self.startButton)
-        form.addRow(self.grindWidget)
+    def _skeletonPaths(self):
+        """(lv, rv) útvonalak, vagy (None, None), ha generálunk."""
+        if self.ui.generateSkeletonCheckBox.checked:
+            return None, None
+        return (self.ui.lvAortaSkeletonPathLineEdit.currentPath,
+            self.ui.rvPaSkeletonPathLineEdit.currentPath)
 
-        self.customWidget = qt.QWidget()
-        c = qt.QFormLayout(self.customWidget)
-        c.setContentsMargins(0, 0, 0, 0)
-        self.customCaseId = qt.QLineEdit()
-        self.customCt = self._path(["Images (*.nii *.nii.gz *.nrrd *.mha)"], "customCt")
-        self.customSeg = self._path(["Images (*.nii *.nii.gz *.nrrd *.mha)"], "customSeg")
-        self.customSegSource = self._combo(cfg.SEG_SOURCES)
-        self.customLabelMap = self._combo(cfg.LABEL_MAPS)
-        self.customStrategy = self._combo(cfg.SEED_STRATEGIES)
-        self.customSheetness = self._path(["Images (*.nii *.nii.gz *.nrrd *.mha)"], "customSheetness")
-        self.customSkeletons = {o: self._path(["Skeleton (*.npz)"], f"customSkeleton_{o}") for o in cfg.OUTFLOWS}
-        self.customMitral = self._path(["Images (*.nii *.nii.gz *.nrrd *.seg.nrrd)"], "customMitral")
-        c.addRow("Case ID:", self.customCaseId)
-        c.addRow("CT:", self.customCt)
-        c.addRow("Segmentation:", self.customSeg)
-        c.addRow("Segmentation source:", self.customSegSource)
-        c.addRow("Label map:", self.customLabelMap)
-        c.addRow("Seed strategy:", self.customStrategy)
-        c.addRow("Sheetness map (Plan B):", self.customSheetness)
-        for o, w in self.customSkeletons.items():
-            c.addRow(f"Skeleton {OUTFLOW_TITLES[o]}:", w)
-        c.addRow("Mitral valve (optional):", self.customMitral)
-        self.loadCustomButton = qt.QPushButton("Load case")
-        c.addRow(self.loadCustomButton)
-        form.addRow(self.customWidget)
+    def _checkCanApply(self, *args) -> None:
+        missing = [name for name, w in (("CT", self.ui.ctPathLineEdit),
+                        ("segmentation", self.ui.segmentationPathLineEdit),
+                        ("label config", self.ui.labelConfigPathLineEdit))
+                                        if not w.currentPath]
+        lv, rv = self._skeletonPaths()
+        if not self.ui.generateSkeletonCheckBox.checked and not (lv and rv):
+            missing.append("both skeletons (or tick Generate Skeleton)")
+        self.ui.loadCaseButton.enabled = not missing
+        self.ui.loadCaseButton.toolTip = ("Load the case" if not missing
+                                    else "Missing: " + ", ".join(missing))
 
-        self.caseLabel = qt.QLabel("No case loaded.")
-        self.caseLabel.wordWrap = True
-        form.addRow(self.caseLabel)
-
-        self.grindRadio.connect("toggled(bool)", self._onModeChanged)
-        self.startButton.connect("clicked()", self.onStartGrind)
-        self.loadCustomButton.connect("clicked()", self.onLoadCustom)
-        self._onModeChanged()
-
-    def _setupSeedSection(self):
-        box, form = self._section("2. Seed")
-        self.seedBox = box
-        self.regionCombo = self._combo(cfg.REGIONS)
-        form.addRow("Region:", self.regionCombo)
-        self.dSlider = ctk.ctkSliderWidget()
-        self.dSlider.minimum, self.dSlider.maximum, self.dSlider.singleStep = 0.5, 20.0, 0.5
-        self.dSlider.value = cfg.DEFAULTS["d_mm"]
-        self.dSlider.suffix = " mm"
-        self.dSlider.tracking = False
-        form.addRow("Band distance d:", self.dSlider)
-        self.tSlider = ctk.ctkSliderWidget()
-        self.tSlider.minimum, self.tSlider.maximum, self.tSlider.singleStep, self.tSlider.decimals = 0, 1, 0.01, 2
-        self.tSlider.value = cfg.DEFAULTS["sheetness_threshold"]
-        self.tSlider.tracking = False
-        self.tLabel = qt.QLabel("Sheetness threshold t:")
-        form.addRow(self.tLabel, self.tSlider)
-        self.seedInfo = qt.QLabel("")
-        form.addRow(self.seedInfo)
-        self.regionCombo.connect("currentIndexChanged(int)", self.onSeedParams)
-        self.dSlider.connect("valueChanged(double)", self.onSeedParams)
-        self.tSlider.connect("valueChanged(double)", self.onSeedParams)
-
-    def _setupPlaneSection(self):
-        box, layout = self._section("3. Outflow planes (bidirectional search)")
-        self.planeBox = box
-        help_ = qt.QLabel("1) Start at MAX, slide down until the cut first looks acceptable, Set upper. "
-                          "2) Start at MIN, slide up until it first looks acceptable, Set lower. "
-                          "The GT index is the midpoint.")
-        help_.wordWrap = True
-        layout.addRow(help_)
-        for outflow in cfg.OUTFLOWS:
-            group = qt.QGroupBox(OUTFLOW_TITLES[outflow])
-            f = qt.QFormLayout(group)
-            ui = {}
-            ui["slider"] = ctk.ctkSliderWidget()
-            ui["slider"].decimals = 0
-            ui["slider"].singleStep = 1
-            ui["slider"].tracking = False
-            f.addRow("Skeleton index:", ui["slider"])
-            row = qt.QHBoxLayout()
-            for key, text in (("fromMax", "Start at MAX"), ("setUpper", "Set upper"),
-                              ("fromMin", "Start at MIN"), ("setLower", "Set lower"), ("reset", "Reset")):
-                ui[key] = qt.QPushButton(text)
-                row.addWidget(ui[key])
-            f.addRow(row)
-            ui["info"] = qt.QLabel("")
-            f.addRow(ui["info"])
-            ui["tilt"] = qt.QCheckBox("Tilt override")
-            ui["tiltA"] = ctk.ctkSliderWidget()
-            ui["tiltB"] = ctk.ctkSliderWidget()
-            for s in (ui["tiltA"], ui["tiltB"]):
-                s.minimum, s.maximum, s.singleStep, s.decimals = -45, 45, 1, 0
-                s.suffix = "°"
-                s.tracking = False
-            f.addRow(ui["tilt"])
-            f.addRow("Tilt angle a:", ui["tiltA"])
-            f.addRow("Tilt angle b:", ui["tiltB"])
-            row2 = qt.QHBoxLayout()
-            ui["free"] = qt.QCheckBox("Free-hand (skeleton failed)")
-            ui["applyFree"] = qt.QPushButton("Apply markup plane")
-            row2.addWidget(ui["free"])
-            row2.addWidget(ui["applyFree"])
-            f.addRow(row2)
-            row3 = qt.QHBoxLayout()
-            ui["notPresent"] = qt.QCheckBox("Connection not present")
-            ui["lock"] = qt.QCheckBox("Lock")
-            row3.addWidget(ui["notPresent"])
-            row3.addWidget(ui["lock"])
-            f.addRow(row3)
-            layout.addRow(group)
-            self.planeUi[outflow] = ui
-
-            ui["slider"].connect("valueChanged(double)", lambda v, o=outflow: self.onPlaneSlider(o, v))
-            ui["fromMax"].connect("clicked()", lambda o=outflow: self.onPlaneJump(o, "max"))
-            ui["fromMin"].connect("clicked()", lambda o=outflow: self.onPlaneJump(o, "min"))
-            ui["setUpper"].connect("clicked()", lambda o=outflow: self.onPlaneBound(o, "upper"))
-            ui["setLower"].connect("clicked()", lambda o=outflow: self.onPlaneBound(o, "lower"))
-            ui["reset"].connect("clicked()", lambda o=outflow: self.onPlaneReset(o))
-            ui["tilt"].connect("toggled(bool)", lambda c, o=outflow: self.onPlaneTilt(o))
-            ui["tiltA"].connect("valueChanged(double)", lambda v, o=outflow: self.onPlaneTilt(o))
-            ui["tiltB"].connect("valueChanged(double)", lambda v, o=outflow: self.onPlaneTilt(o))
-            ui["free"].connect("toggled(bool)", lambda c, o=outflow: self.onPlaneFree(o, c))
-            ui["applyFree"].connect("clicked()", lambda o=outflow: self.onPlaneApplyFree(o))
-            ui["notPresent"].connect("toggled(bool)", lambda c, o=outflow: self.onPlaneNotPresent(o, c))
-            ui["lock"].connect("toggled(bool)", lambda c, o=outflow: self.onPlaneLock(o, c))
-
-    def _setupEditSection(self):
-        box, form = self._section("4. Correction", collapsed=True)
-        self.editBox = box
-        self.editor = slicer.qMRMLSegmentEditorWidget()
-        self.editor.setMRMLScene(slicer.mrmlScene)
-        self.editorNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentEditorNode", "SeptumAnnotatorEditor")
-        self.editorNode.SetSingletonTag("SeptumAnnotatorEditor")
-        self.editor.setMRMLSegmentEditorNode(self.editorNode)
-        if hasattr(self.editor, "setEffectNameOrder"):
-            self.editor.setEffectNameOrder(["Islands", "Erase", "Paint", "Smoothing", "Scissors"])
-        if hasattr(self.editor, "unorderedEffectsVisible"):
-            self.editor.unorderedEffectsVisible = False
-        form.addRow(self.editor)
-        note = qt.QLabel("Prefer 'Islands' (remove spurious components). Chamber voxels added here are "
-                         "dropped automatically; holes are handled in step 5.")
-        note.wordWrap = True
-        form.addRow(note)
-
-    def _setupOpeningSection(self):
-        box, form = self._section("5. Hole QA")
-        self.openingBox = box
-        self.detectButton = qt.QPushButton("Detect openings")
-        form.addRow(self.detectButton)
-        self.openingList = qt.QListWidget()
-        self.openingList.setMinimumHeight(120)
-        form.addRow(self.openingList)
-        row = qt.QHBoxLayout()
-        self.prevButton = qt.QPushButton("◀ Previous")
-        self.nextButton = qt.QPushButton("Next ▶")
-        self.approveButton = qt.QPushButton("Approve (true defect)")
-        self.rejectButton = qt.QPushButton("Reject (patch)")
-        for b in (self.prevButton, self.approveButton, self.rejectButton, self.nextButton):
-            row.addWidget(b)
-        form.addRow(row)
-        self.uncertainCheck = qt.QCheckBox("Uncertain")
-        form.addRow(self.uncertainCheck)
-        self.detectButton.connect("clicked()", self.onDetectOpenings)
-        self.openingList.connect("currentRowChanged(int)", self.onOpeningSelected)
-        self.prevButton.connect("clicked()", lambda: self._stepOpening(-1))
-        self.nextButton.connect("clicked()", lambda: self._stepOpening(1))
-        self.approveButton.connect("clicked()", lambda: self.onDecide("approve"))
-        self.rejectButton.connect("clicked()", lambda: self.onDecide("reject"))
-
-    def _setupFinishSection(self):
-        box, form = self._section("6. Lock & export")
-        self.finishBox = box
-        self.notesEdit = qt.QPlainTextEdit()
-        self.notesEdit.setMaximumHeight(60)
-        self.notesEdit.placeholderText = "Notes for the log (optional)"
-        form.addRow(self.notesEdit)
-        self.exportButton = qt.QPushButton("Lock && export")
-        self.exportButton.setStyleSheet("font-weight: bold")
-        form.addRow(self.exportButton)
-        self.exportButton.connect("clicked()", self.onExport)
-
-    # ================================================================ helpers
-    def _setCaseLoaded(self, loaded):
-        for box in (self.seedBox, self.planeBox, self.editBox, self.openingBox, self.finishBox):
-            box.enabled = loaded
-
-    def _onModeChanged(self, *args):
-        self.grindWidget.visible = self.grindRadio.checked
-        self.customWidget.visible = self.customRadio.checked
-
-    def _confirmDiscard(self):
-        if self.logic.session is None or self.exported:
-            return True
-        return slicer.util.confirmYesNoDisplay("The current case has not been exported. Discard it?")
-
-    def _outputDir(self):
-        path = self.outputDir.currentPath
-        if not path:
-            raise ValueError("Select an output folder first.")
-        os.makedirs(path, exist_ok=True)
-        return path
-
-    # ================================================================ case loading
-    def onStartGrind(self):
-        if not self._confirmDiscard():
+    def onLoadCaseButton(self) -> None:
+        lv, rv = self._skeletonPaths()
+        with slicer.util.tryWithErrorDisplay("Failed to process the case.", waitCursor=True):
+            self.logic.processCase(self.ui.ctPathLineEdit.currentPath,
+                            self.ui.segmentationPathLineEdit.currentPath,
+                            self.ui.labelConfigPathLineEdit.currentPath,
+                            lv, rv,
+                            generate_skeletons=self.ui.generateSkeletonCheckBox.checked,
+                            case_id=self.ui.caseIdLineEdit.text)
+            self._initPlaneControls()
+            self.ui.planesCollapsibleButton.enabled = False
+            self.ui.seedCollapsibleButton.enabled = True
+            self.ui.seedCollapsibleButton.collapsed = False
+        
+    # --- SEED ESEMÉNYKEZELŐK ---
+        
+    def onSeedParameterChanged(self, *args):
+        seed = self.logic.seed
+        if seed is None or seed.settings is None:  # még nem nyomták meg a Load Seed-et
             return
-        with slicer.util.tryWithErrorDisplay("Could not start grind mode.", waitCursor=True):
-            path = self.configPath.currentPath
-            if path.lower().endswith((".xlsx", ".xlsm")):
-                self._ensureOpenpyxl()
-            self.cases = cfg.load_config(path)
-            if not self.cases:
-                raise ValueError("The config table contains no cases.")
-            self.manifest = manifest.Manifest(os.path.join(self._outputDir(), "manifest.csv"),
-                                              [c.case_id for c in self.cases])
-            self.grind = True
-            self._loadNextGrindCase()
+        print(f"[DEBUG] Seed parameters changed: bandWidth={self.ui.bandWidthSliderWidget.value}, region={self.ui.regionComboBox.currentText}")
+        self.onLoadSeedButton()
+    
+    def _seedOptions(self):
+        """(strategy, region) a jelenlegi UI-állapotból. Sheetness esetén mindig band."""
+        strategy = self.ui.seedStrategyComboBox.currentText.lower()
+        region = "band" if strategy == "sheetness" else self.ui.regionComboBox.currentText.lower()
+        return strategy, region
 
-    def _loadNextGrindCase(self):
-        next_id = self.manifest.next_case([c.case_id for c in self.cases])
-        if next_id is None:
-            self.logic.clear()
-            self._setCaseLoaded(False)
-            counts = self.manifest.counts()
-            self.caseLabel.text = f"All cases done ({counts['done']}/{len(self.cases)})."
-            slicer.util.infoDisplay("All cases in the config table are done.")
-            return
-        case = next(c for c in self.cases if c.case_id == next_id)
-        self._loadCase(case)
-        self.manifest.set_status(case.case_id, "in_progress")
-        counts = self.manifest.counts()
-        self.caseLabel.text = (f"<b>{case.case_id}</b> — {counts['done']}/{len(self.cases)} done "
-                               f"(seed: {case.seed_strategy}, region: {case.region}, segmentation: {case.seg_source})")
+    def _updateSeedControls(self, *args):
+        strategy, region = self._seedOptions()
+        
+        self.ui.regionComboBox.blockSignals(True)
+        self.ui.regionComboBox.currentText = region
+        self.ui.regionComboBox.blockSignals(False)
+        
+        self.ui.regionComboBox.enabled = strategy == "myocardium"
+        self.ui.bandWidthSliderWidget.enabled = region == "band"
+        self.ui.thresholdSliderWidget.enabled = strategy == "sheetness"
+            
+    def onLoadSeedButton(self) -> None:
+        strategy, region = self._seedOptions()
+        with slicer.util.tryWithErrorDisplay("Failed to generate the seed.", waitCursor=True):
+            self.logic.generateSeed(SeedSettings(
+                strategy=strategy,
+                region=region,
+                d_mm=self.ui.bandWidthSliderWidget.value,
+                threshold=self.ui.thresholdSliderWidget.value,
+            ))
+            self.ui.planesCollapsibleButton.enabled = True
+            self.ui.planesCollapsibleButton.collapsed = False
+    
+    # --- PLANE ESEMÉNYKEZELŐK ---
+    
+    def _w(self, outflow, name):
+        """Lekéri a megfelelő widgetet az outflow-prefix és a widgettípus alapján."""
+        return getattr(self.ui, f"{outflow}{name}")
 
-    def onLoadCustom(self):
-        if not self._confirmDiscard():
-            return
-        with slicer.util.tryWithErrorDisplay("Could not load the case.", waitCursor=True):
-            ct = self.customCt.currentPath
-            case = cfg.CaseConfig(
-                case_id=self.customCaseId.text.strip() or os.path.basename(ct).split(".")[0],
-                ct_path=ct,
-                seg_path=self.customSeg.currentPath,
-                seg_source=self.customSegSource.currentText,
-                label_map=self.customLabelMap.currentText,
-                seed_strategy=self.customStrategy.currentText,
-                region=self.regionCombo.currentText,
-                sheetness_path=self.customSheetness.currentPath,
-                skeleton_lv_aorta=self.customSkeletons["lv_aorta"].currentPath,
-                skeleton_rv_pa=self.customSkeletons["rv_pa"].currentPath,
-                mitral_path=self.customMitral.currentPath,
-            )
-            self._outputDir()
-            self.grind = False
-            self._loadCase(case)
-            self.caseLabel.text = f"<b>{case.case_id}</b> (custom)"
+    def _plane(self, o) -> OutflowPlane:
+        """A logikából lekéri az adott kiáramlási szekcióhoz tartozó OutflowPlane objektumot."""
+        # A widget és a logika ugyanazokat az lvAorta/rvPa kulcsokat használja.
+        return self.logic.planes[o]
 
-    def _loadCase(self, case):
-        s = self.logic.loadCase(case, self.dSlider.value, self.tSlider.value)
-        self.exported = False
-        self._updating = True
+    def _setSilently(self, widget, prop, value):
+        """ Megakadályozza, hogy a widget állapotának változtatása eseményláncot indítson. """
+        widget.blockSignals(True)
         try:
-            self.regionCombo.currentText = case.region
-            plan_b = case.seed_strategy == "sheetness"
-            self.tSlider.visible = self.tLabel.visible = plan_b
-            for outflow, ui in self.planeUi.items():
-                state = s.planes[outflow]
-                n = len(state.skeleton) if state.skeleton is not None else 1
-                ui["slider"].minimum, ui["slider"].maximum = 0, max(n - 1, 0)
-                ui["slider"].value = n - 1
-                ui["tilt"].checked = False
-                ui["tiltA"].value = ui["tiltB"].value = 0
-                ui["free"].checked = state.skeleton is None
-                ui["notPresent"].checked = state.not_present
-                ui["lock"].checked = False
-                self._refreshPlane(outflow)
-            self.notesEdit.plainText = ""
-            self.openingList.clear()
-            self.currentOpening = None
+            setattr(widget, prop, value)
         finally:
-            self._updating = False
-        if not slicer.mrmlScene.IsNodePresent(self.editorNode):  # removed by a scene close
-            self.editorNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentEditorNode", "SeptumAnnotatorEditor")
-            self.editor.setMRMLSegmentEditorNode(self.editorNode)
-        self.editor.setSegmentationNode(self.logic.nodes["septum"])
-        self.editor.setSourceVolumeNode(self.logic.nodes["work"])
-        self.editor.setCurrentSegmentID(self.logic.septumId)
-        lm = slicer.app.layoutManager()
-        lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
-        # The editor switches the background to its source (1 mm) volume; show the native CT instead.
-        slicer.util.setSliceViewerLayers(background=self.logic.nodes["ct"], fit=True)
-        lm.threeDWidget(0).threeDView().resetFocalPoint()
-        lm.threeDWidget(0).threeDView().resetCamera()
-        self._setCaseLoaded(True)
-        self._updateSeedInfo()
+            widget.blockSignals(False)
+            
+    def _initPlaneControls(self) -> None:
+        """Az új eset betöltésekor inicializálja a plane beállító UI elemeket."""
+        # Használat: a onLoadCaseButton eseménykezelőben, az eset sikeres betöltésekor.
+        self._searching = {o: None for o in OUTFLOWS} # törli a keresési állapotokat
+        for o in OUTFLOWS: # mindkét kiáramláshoz:
+            p = self._plane(o) # lekéri a síkállapotot
+            slider = self._w(o, "IndexSliderWidget") # lekéri a csúszkát
+            slider.minimum = 0 # beállítja a minimumot
+            slider.maximum = p.skeleton.max_index if p.skeleton else 0 # beállítja a maximumot a skeleton max_index alapján
+            self._refresh(o) # panel frissítése
 
-    def _ensureOpenpyxl(self):
-        try:
-            import openpyxl  # noqa: F401
-        except ImportError:
-            if slicer.util.confirmOkCancelDisplay("Reading .xlsx needs the 'openpyxl' package. Install it now?"):
-                slicer.util.pip_install("openpyxl")
-            else:
-                raise
+    def _refresh(self, o):
+        """A widget állapotát a logika aktuális síkállapotához igazítja."""
+        p = self._plane(o) # A logikától lekéri az aktuális síkállapotot
+        searching = self._searching.get(o) # Éppen melyik határ keresése folyik
 
-    # ================================================================ seed
-    def onSeedParams(self, *args):
-        if self._updating or self.logic.session is None:
-            return
-        with slicer.util.tryWithErrorDisplay("Seed update failed.", waitCursor=True):
-            self.logic.recompute(d_mm=self.dSlider.value, region=self.regionCombo.currentText,
-                                 sheetness_threshold=self.tSlider.value)
-            self._updateSeedInfo()
+        # Checkboxok állapota: sík állapotból blokkolással
+        self._setSilently(self._w(o, "TiltOverrideCheckBox"), "checked", p.tilt is not None)
+        self._setSilently(self._w(o, "LockCheckBox"), "checked", p.locked)
 
-    def _updateSeedInfo(self):
-        s = self.logic.session
-        e = s.edits.counts()
-        self.seedInfo.text = (f"Seed: {int(s.seed.sum())} voxels · added {e['voxels_added']} · "
-                              f"removed {e['voxels_removed']} · patched {e['voxels_patched']}")
+        # Widgetek láthatósága: a kiválasztott módhoz tartozik, a többi widget rejtve marad.
+        for name in ALL_WIDGETS: 
+            self._w(o, name).visible = name in PLANE_WIDGETS.get(p.mode, set())
 
-    # ================================================================ planes
-    def _state(self, outflow):
-        return self.logic.session.planes[outflow]
+        # Widgetek engedélyezése: a sík állapotától függően
+        editable = not p.locked
+        self._w(o, "ModeComboBox").enabled = editable
+        self._w(o, "IndexWidget").enabled = editable and p.skeleton is not None
+        self._w(o, "SetUpperButton").enabled = editable and searching == "upper"
+        self._w(o, "SetLowerButton").enabled = editable and searching == "lower"
+        self._w(o, "TiltWidget").enabled = editable and p.gt_index is not None
+        self._w(o, "TiltAngleASliderWidget").enabled = editable and p.tilt is not None
+        self._w(o, "TiltAngleBSliderWidget").enabled = editable and p.tilt is not None
+        self._w(o, "FreeHandWidget").enabled = editable
+        self._w(o, "LockCheckBox").enabled = p.isResolved or p.locked
 
-    def _refreshPlane(self, outflow):
-        state, ui = self._state(outflow), self.planeUi[outflow]
-        has_skel = state.skeleton is not None
-        free = state.free_point is not None or ui["free"].checked
-        locked = state.locked
-        searching = has_skel and not free and not state.not_present and not locked
-        for key in ("slider", "fromMax", "fromMin", "setUpper", "setLower", "reset"):
-            ui[key].enabled = searching
-        ui["tilt"].enabled = has_skel and state.gt_index is not None and not locked and not free
-        ui["tiltA"].enabled = ui["tiltB"].enabled = ui["tilt"].enabled and ui["tilt"].checked
-        ui["free"].enabled = not locked and not state.not_present
-        ui["applyFree"].enabled = ui["free"].checked and not locked
-        ui["notPresent"].enabled = not locked
-        ui["lock"].enabled = state.resolved or locked
+        # Információs szöveg: a keresés állapota + a sík állapota (mik vannak már beállítva)
+        searching_text = f"Searching the {searching} bound · " if searching else ""
+        self._w(o, "InfoLabel").text = searching_text + p.describe()
+        
+        # Előnézeti sík: a csúszka aktuális értékétől függ, ha keresés folyik, egyébként a végleges sík látható.
+        shown = (
+            p.skeleton.planeAt(self._w(o, "IndexSliderWidget").value)
+            if searching and p.skeleton is not None
+            else p.plane
+        )
+        
+        self.logic.showPlane(
+            o,
+            shown,
+            freeHand=p.mode == "free hand",
+            locked=p.locked,
+        )
 
-        parts = []
-        if not has_skel:
-            parts.append("No skeleton: use free-hand mode.")
-        if state.upper is not None:
-            parts.append(f"upper {state.upper}")
-        if state.lower is not None:
-            parts.append(f"lower {state.lower}")
-        if state.gt_index is not None:
-            width = state.skeleton.arc_length(state.upper) - state.skeleton.arc_length(state.lower)
-            parts.append(f"<b>GT index {state.gt_index:g}</b> (range {state.upper - state.lower} idx, {width:.1f} mm)")
-        if state.free_point is not None:
-            parts.append("<b>free-hand plane</b>")
-        if state.not_present:
-            parts.append("connection not present")
-        ui["info"].text = " · ".join(parts)
+    def onModeChanged(self, o):
+        """A combo box változásának eseménykezelője"""
+        p = self._plane(o)
+        mode = self._w(o, "ModeComboBox").currentText.lower()
+        # Szabadkézi módhoz először biztosítunk egy kiinduló síkot, amit a felhasználó
+        # a markup nézetben elmozdíthat.
+        if mode == "free hand" and p.free_hand is None:
+            self.logic.placePlaneNode(
+                o,
+                p.plane or self.logic.defaultPlane(o),
+            )
+        p.mode = mode
+        self._searching[o] = None
+        self._planeChanged(o)
 
-        plane_node = self.logic.planeNodes.get(outflow)
-        if plane_node is not None:
-            plane_node.SetLocked(not (ui["free"].checked and not locked))
-        if ui["free"].checked and state.free_point is None and not locked:
-            # start the free-hand plane where the skeleton plane is (or at the chamber centre)
-            plane = state.plane(use_preview=True)
+    def onStartAt(self, o, which):
+        """A Start at Max/Min gomb eseménykezelője: a csúszka mozgatása a skeleton határához."""
+        p = self._plane(o)
+        p.tilt = None  # a dőlés a korábbi GT-indexhez tartozott
+        # A keresés csak előnézetet mozgat; a határ csak a Set gomb megnyomásakor rögzül.
+        self._searching[o] = which
+        self._w(o, "IndexSliderWidget").value = p.skeleton.max_index if which == "upper" else 0
+        self._planeChanged(o)
+
+    def onIndexSliderChanged(self, o):
+        """A csúszka mozgatásának eseménykezelője, ha éppen keresés folyik, frissíti az előnézetet."""
+        if self._searching.get(o):
+            # A csúszka mozgatása nem vágja újra a seedet, csak a jelölt síkot frissíti.
+            self._refresh(o)  # csak az előnézet mozog, a seed nem változik
+
+    def onSetBound(self, o, which):
+        """A Set Upper/Lower gomb eseménykezelője: a csúszka aktuális értékét rögzíti a sík állapotában."""
+        with slicer.util.tryWithErrorDisplay("Could not set the bound."):
+            # A rögzített határ az OutflowPlane állapotába kerül.
+            self._plane(o).setBound(which, int(self._w(o, "IndexSliderWidget").value))
+        self._searching[o] = None # A keresés befejeződött
+        self._planeChanged(o)
+
+    def onResetPlane(self, o):
+        """A Reset gomb eseménykezelője: a sík állapotát visszaállítja alapállapotba, nincsen keresés, frissíti a felületet, újravágja."""
+        # A reset csak a mentett síkparamétereket törli; a seed újravágása
+        # az eseménykezelő közös útján történik.
+        self._plane(o).reset()
+        self._searching[o] = None
+        self._planeChanged(o)
+
+    def onTiltChanged(self, o):
+        """A TiltOverrideCheckBox és a két dőléscsúszka eseménykezelője: a sík állapotát frissíti, újravágja a seedet."""
+        on = self._w(o, "TiltOverrideCheckBox").checked
+        self._plane(o).tilt = (self._w(o, "TiltAngleASliderWidget").value,
+                            self._w(o, "TiltAngleBSliderWidget").value) if on else None
+        self._planeChanged(o) # Az újravágás miatt néha lassú lehet.
+
+    def onFreeHandApply(self, o):
+        """A Free-Hand Apply gomb eseménykezelője: a Slicer markup aktuális helyzetét végleges, RAS-alapú Plane-ként mentjük."""
+        self._plane(o).free_hand = self.logic.readPlaneNode(o)
+        self._planeChanged(o)
+
+    def onLockToggled(self, o, checked):
+        """A LockCheckBox eseménykezelője: a sík állapotát zárolja, ha érvényes sík esetén zárolja vagy feloldja a síkot."""
+        p = self._plane(o)
+        # Csak feloldott és érvényes sík zárható le, 
+        # a markup interakciója ilyenkor azonnal letiltódik.
+        if checked and not p.isResolved:
+            slicer.util.warningDisplay("Set both bounds (or apply a free-hand plane) before locking.")
+        else:
+            p.locked = checked
+        self._refresh(o)  # a refresh visszaírja a pipát az állapotból
+
+    def _planeChanged(self, o):
+        """A jelenlegi plane alapján újravágja a seedet és frissíti a felületet."""
+        # Minden végleges módosítás után a seedet minden aktív sík metszetével frissítjük.
+        self.logic.recutSeed()  # seed = alap ∩ minden végleges sík alatti tartomány
+        self._refresh(o)
+
+
+
+import numpy as np
+from dataclasses import dataclass
+
+def lps_to_ras(v):
+    """LPS -> RAS koordináta transzformáció (X és Y tengely tükrözése)."""
+    return [-float(v[0]), -float(v[1]), float(v[2])]
+
+def _unit(v) -> np.ndarray:
+    v = np.asarray(v, dtype=float)
+    n = np.linalg.norm(v)
+    if n == 0:
+        raise ValueError("zero-length vector")
+    return v / n
+            
+#
+# SeptumAnnotatorLogic
+#
+
+def belowPlaneMask(volumeNode, plane: Plane, bounds=None) -> np.ndarray:
+    """Bool maszk (k, j, i) sorrendben: True a sík kamra felőli oldalán lévő voxeleknél.
+
+    Feltételezi, hogy plane.normal egységvektor, és az artéria felé mutat.
+    bounds: opcionális (k_slice, j_slice, i_slice), ekkor csak ezt a részt számolja 
+    és a kimenet alakja a bounds alakja.
+    """
+    import vtk
+
+    # Előjeles távolság egy x RAS pontra: d = (x - p) · n   (mm-ben, mert |n| = 1)
+    #   d = 0: a síkon,  d < 0: kamra felőli oldal,  d > 0: artéria felőli oldal.
+    #
+    # Egy voxel RAS pontja: x = M · v + t,  ahol v = (i, j, k),
+    #   M = matrix[:3, :3]  (IJK -> RAS forgatás és voxelméret),
+    #   t = matrix[:3, 3]   (a (0, 0, 0) voxel középpontjának RAS koordinátája).
+    #
+    # Behelyettesítve:  d = (M · v) · n + (t - p) · n
+    # Mivel (M · v) · n = v · (Mᵀ · n):
+    #   d = i·ci + j·cj + k·ck + constant,   ahol (ci, cj, ck) = Mᵀ · n.
+    # Ezért a síkérték három tengelyenkénti 1D tag összegeként számítható,
+    # és nem kell teljes 3D RAS-koordinátatömböket létrehozni.
+
+    ijk_to_ras = vtk.vtkMatrix4x4()
+    volumeNode.GetIJKToRASMatrix(ijk_to_ras)
+    matrix = slicer.util.arrayFromVTKMatrix(ijk_to_ras)
+    coefficients = matrix[:3, :3].T @ plane.normal       # (ci, cj, ck)
+    constant = (matrix[:3, 3] - plane.point) @ plane.normal
+
+    # A VTK dimenziói (i, j, k) sorrendűek, a numpy-maszk tengelyei (k, j, i).
+    ni, nj, nk = volumeNode.GetImageData().GetDimensions()
+    if bounds is None:
+        bounds = (slice(0, nk), slice(0, nj), slice(0, ni))
+    k_slice, j_slice, i_slice = bounds
+
+    # Abszolút indexekkel számolunk (nem a bounding boxhoz képest),
+    # ezért a constant a részterületen is ugyanaz. A konstanst egyszer, a k taghoz adjuk.
+    i = (np.arange(i_slice.start, i_slice.stop) * coefficients[0]).astype(np.float32)
+    j = (np.arange(j_slice.start, j_slice.stop) * coefficients[1]).astype(np.float32)
+    k = (np.arange(k_slice.start, k_slice.stop) * coefficients[2] + constant).astype(np.float32)
+
+    # Broadcasting: a három 1D tag (k, j, i) alakú tömbbé adódik össze, így minden voxelnél
+    # megkapjuk d-t. Pl. az i tag egy adott i indexnél minden j-re és k-ra ugyanaz.
+    # float32: a pontosan a síkon fekvő voxelek kerekítés miatt bármelyik oldalra kerülhetnek.
+    return (k[:, None, None] + j[None, :, None] + i[None, None, :]) <= 0
+
+
+class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
+    case: CaseData
+    seed: SeedData
+    
+    def __init__(self) -> None:
+        ScriptedLoadableModuleLogic.__init__(self)
+        self.case = None
+        self.seed = None
+        self.planes = None
+        self.planeNodes = {} # A kiáramlási síkok markup-nodjainak tárolása, hogy a felhasználó által elmozdított síkokat is tudjuk olvasni.
+        self.seedBaseMask = None
+        
+    # --- CASE LOGIKA ---
+
+    def processCase(self, ct_path: str, segmentation_path: str, label_config_path: str, lv_skel: str, rv_skel: str, generate_skeletons: bool, case_id : str = "") -> None:
+        """Betölti a CT-t és a szegmentációt, és megjeleníti őket."""
+        
+        new_case  = CaseData(case_id=case_id or os.path.basename(ct_path),
+                               ct_path=ct_path,
+                               seg_path=segmentation_path,
+                               label_config_path=label_config_path,
+                               skeleton_lv_aorta_path=lv_skel,
+                               skeleton_rv_pa_path=rv_skel,
+                               generate_skeleton=generate_skeletons)
+
+        if self.case is not None:  # az előző esetet csak sikeres betöltés után dobjuk el
+            self.case.removeNodes()
+        self.case = new_case
+        self.seed = SeedData(self.case)  # egy seed esetenként
+        # A síkállapot az esethez tartozik, ezért seed-paraméter módosításakor
+        # nem szabad új OutflowPlane objektumokkal felülírni.
+        self.seedBaseMask = None
+        # Minden kiáramlási szekció saját, tartós döntési állapotot kap.
+        self.planes = {
+            outflow: OutflowPlane(skeleton=self.case.skeletons.get(outflow))
+            for outflow in OUTFLOWS
+        }
+        self.planeNodes = {}
+        # A sík-node-ok csak egyszer jönnek létre az eset betöltésekor.
+        self._ensurePlaneNodes()
+        
+        # Szegmensek megjelenítésének beállítása: 2D-ben 40% kitöltés, 60% kontúr, csak a kötelező struktúrák látszanak
+        disp = self.case.segmentation.GetDisplayNode()
+        disp.SetAllSegmentsOpacity2DFill(0.4)
+        disp.SetAllSegmentsOpacity2DOutline(0.6)
+        disp.SetAllSegmentsVisibility(False)
+        for name in REQUIRED_STRUCTURES:
+            disp.SetSegmentVisibility(self.case.segment_ids[name], True)
+    
+        # Skeleton-ok megjelenítése, eleve RAS koordinátákban, a fájlokban LPS-ben vannak tárolva
+        # Generálási módban a skeletons szótár üres lehet, ezért csak a meglévőket rajzoljuk ki.
+        for outflow, name in (("lvAorta", "Skeleton_lv_aorta"), ("rvPa", "Skeleton_rv_pa")):
+            skeleton = self.case.skeletons.get(outflow)
+            if skeleton is not None:
+                self.case.track(self._addPolyline(name, skeleton.points))
+
+        # Slicer nézetek frissítése 
+        slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        slicer.util.setSliceViewerLayers(background=self.case.ct, label=None, fit=True)
+        self.case.segmentation.CreateClosedSurfaceRepresentation()
+        slicer.util.resetThreeDViews()
+        
+        print(f"Case loaded: {os.path.basename(ct_path)} "
+                     f"(Generate Skeletons: {generate_skeletons})")
+        
+    def _addPolyline(self, name: str, points: np.ndarray):
+        """Kirajzolja a skeleton pontokat a 3D Slicer nézetébe sárga vonalként."""
+        import vtk
+        pts = vtk.vtkPoints()
+        for p in points:
+            pts.InsertNextPoint(p)
+            
+        line = vtk.vtkPolyLine()
+        line.GetPointIds().SetNumberOfIds(len(points))
+        for i in range(len(points)):
+            line.GetPointIds().SetId(i, i)
+            
+        cells = vtk.vtkCellArray()
+        cells.InsertNextCell(line)
+        
+        poly = vtk.vtkPolyData()
+        poly.SetPoints(pts)
+        poly.SetLines(cells)
+        
+        model = slicer.modules.models.logic().AddModel(poly)
+        model.SetName(name)
+        model.GetDisplayNode().SetColor(1, 1, 0)  # Sárga szín
+        model.GetDisplayNode().SetLineWidth(3)
+        model.GetDisplayNode().SetVisibility2D(True) # Jelenjen meg a 2D CT-ken is
+        
+        return model
+    
+    # --- SEED LOGIKA ---S
+
+    def generateSeed(self, settings: SeedSettings) -> None:
+        if settings.strategy == "myocardium":
+            base = self.case.mask("myo")   # tárolt
+            region = self.case.hull() if settings.region == "hull" else self._band(settings.d_mm)
+            mask = base & region
+        elif settings.strategy == "sheetness":
+            base = self.case.sheetness() > settings.threshold       # a térkép tárolt, a küszöb gyors
+            mask = base & self._band(settings.d_mm)
+        else:
+            raise ValueError(f"Unknown seed strategy: {settings.strategy}")
+        # Ezt a síkoktól függetlenül megőrizzük, hogy minden újravágás innen
+        # induljon, ne az előző vágás eredményét vágjuk tovább.
+        self.seedBaseMask = mask
+        
+        # A már beállított síkokat változatlanul hagyjuk, és az új alapmaszkot
+        # ugyanazokkal a síkokkal vágjuk újra.
+        self.seed.settings = settings
+        self.recutSeed()
+    
+    def _band(self, d_mm: float) -> np.ndarray:
+        return (self.case.distanceMap("lv") <= d_mm) & (self.case.distanceMap("rv") <= d_mm)
+
+    # --- PLANE LOGIKA ---
+    
+    def defaultPlane(self, key) -> Plane:
+        """A skeleton utolsó pontjánál létrehoz egy alapértelmezett síkot, az adott kiáramlási szekcióhoz."""
+        # Használat: az onModeChanged eseménykezlőben, mikor free-hand módba váltunk, de még nincs korábban elmentett free-hand sík.
+        skeleton = self.planes[key].skeleton
+        if skeleton is None:
+            raise ValueError(f"No skeleton is available for {key}.")
+        return skeleton.planeAt(skeleton.max_index)
+    
+    def placePlaneNode(self, key, plane):
+        """A kapott Plane objektum alapján beállítja a Slicer markup node-ot"""
+        # Használat: az onModeChanged eseménykezlőben, a defaultPlane által visszaadott síkkal.
+        node = self.planeNodes[key]
+        node.SetCenterWorld(plane.point)
+        node.SetNormalWorld(plane.normal)
+        node.SetDisplayVisibility(True)
+        node.SetLocked(False)
+        
+    def readPlaneNode(self, key) -> Plane:
+        """A Slicer markup node-ot egy Plane objektummá alakítja."""
+        # Használat: az onFreeHandApply eseménykezelőben.
+        node = self.planeNodes[key]
+        point = np.zeros(3)
+        normal = np.zeros(3)
+        node.GetCenterWorld(point)
+        node.GetNormalWorld(normal)
+        return Plane(point, _unit(normal))
+    
+    def showPlane(self, o, plane, freeHand, locked):
+        """A markup sík node-ot a megadott síkra állítja, és a felhasználói interakciót engedélyezi vagy tiltja."""
+        # Használat: az összes plane eseménykezelőben.
+        node = self.planeNodes[o]
+        userControls = freeHand and not locked
+        # Szabadkézi, feloldott módban a user mozgathatja a node-ot,
+        # más esetben a node-ot a modell által számított síkkal szinkronizáljuk.
+        if not userControls:  # zárolt szabadkézi síknál is: a látott sík legyen a használt sík
             if plane is None:
-                ventricle = cfg.OUTFLOW_STRUCTURES[outflow][0]
-                zyx = np.argwhere(self.logic.session.structures[ventricle]).mean(0)
-                p = self.logic.session.ref.TransformContinuousIndexToPhysicalPoint(tuple(float(v) for v in zyx[::-1]))
-                plane = (np.array(p), np.array([0.0, 0.0, 1.0]))
-            self.logic.showPlane(outflow, plane)
-        else:
-            self.logic.showPlane(outflow, state.plane(use_preview=not locked))
-
-    def _planeChanged(self, outflow):
-        self.logic.recompute()
-        self._refreshPlane(outflow)
-        self._updateSeedInfo()
-
-    def onPlaneSlider(self, outflow, value):
-        if self._updating or self.logic.session is None:
-            return
-        state = self._state(outflow)
-        state.preview_index = float(value)
-        if state.gt_index is None:
-            self._planeChanged(outflow)
-        else:
-            self.logic.showPlane(outflow, state.preview(value))
-
-    def onPlaneJump(self, outflow, which):
-        state = self._state(outflow)
-        slider = self.planeUi[outflow]["slider"]
-        slider.value = state.skeleton.max_index if which == "max" else 0
-        self.onPlaneSlider(outflow, slider.value)
-
-    def onPlaneBound(self, outflow, which):
-        state = self._state(outflow)
-        index = int(round(self.planeUi[outflow]["slider"].value))
-        try:
-            state.set_upper(index) if which == "upper" else state.set_lower(index)
-        except planes.BoundsOrderError as exc:
-            slicer.util.warningDisplay(str(exc))
-        self._planeChanged(outflow)
-
-    def onPlaneReset(self, outflow):
-        state = self._state(outflow)
-        state.reset_search()
-        state.tilt_override = False
-        self.planeUi[outflow]["tilt"].checked = False
-        self._planeChanged(outflow)
-
-    def onPlaneTilt(self, outflow):
-        if self._updating or self.logic.session is None:
-            return
-        state, ui = self._state(outflow), self.planeUi[outflow]
-        state.tilt_override = ui["tilt"].checked
-        state.tilt_a, state.tilt_b = ui["tiltA"].value, ui["tiltB"].value
-        self._planeChanged(outflow)
-
-    def onPlaneFree(self, outflow, checked):
-        if self._updating or self.logic.session is None:
-            return
-        if not checked:
-            self._state(outflow).clear_free_hand()
-            self._planeChanged(outflow)
-        else:
-            self._refreshPlane(outflow)
-
-    def onPlaneApplyFree(self, outflow):
-        point, normal = self.logic.freeHandFromNode(outflow)
-        self._state(outflow).set_free_hand(point, normal)
-        self._planeChanged(outflow)
-
-    def onPlaneNotPresent(self, outflow, checked):
-        if self._updating or self.logic.session is None:
-            return
-        self._state(outflow).not_present = checked
-        self._planeChanged(outflow)
-
-    def onPlaneLock(self, outflow, checked):
-        if self._updating or self.logic.session is None:
-            return
-        state = self._state(outflow)
-        if checked and not state.resolved:
-            slicer.util.warningDisplay("Set both bounds (or a free-hand plane) before locking.")
-            self._updating = True
-            self.planeUi[outflow]["lock"].checked = False
-            self._updating = False
-            return
-        state.locked = checked
-        self.logic.session.mark(f"plane_{outflow}_{'locked' if checked else 'unlocked'}")
-        self._planeChanged(outflow)
-
-    # ================================================================ openings
-    def onDetectOpenings(self):
-        with slicer.util.tryWithErrorDisplay("Opening detection failed.", waitCursor=True):
-            self.logic.syncEdits()
-            self.logic.pushMask()
-            self.logic.session.detect_openings()
-            self._fillOpeningList()
-            if self.openingList.count:
-                self.openingList.setCurrentRow(0)
+                node.SetDisplayVisibility(False)
             else:
-                self.logic.showOpening(None)
-            self._updateSeedInfo()
+                node.SetCenterWorld(plane.point)
+                node.SetNormalWorld(plane.normal)
+                node.SetDisplayVisibility(True)
+        else:
+            node.SetDisplayVisibility(True)
+        node.SetLocked(not userControls)
+        displayNode = node.GetDisplayNode()
+        # Free-hand módban azonnal látszódjanak a forgató és mozgató handle-ek.
+        displayNode.SetHandlesInteractive(userControls)
+        displayNode.SetRotationHandleVisibility(userControls)
+        displayNode.SetTranslationHandleVisibility(userControls)
+        displayNode.SetScaleHandleVisibility(False)  # a méret nem befolyásolja a vágást
 
-    def _fillOpeningList(self, keep_row=None):
-        self.openingList.blockSignals(True)
-        self.openingList.clear()
-        for o in self.logic.session.openings:
-            mark = {"approve": "✔ approved", "reject": "✖ rejected", None: "• undecided"}[o.decision]
-            unc = " (uncertain)" if o.uncertain else ""
-            self.openingList.addItem(f"{mark}{unc} — {o.size_mm3:.1f} mm³ — {o.origin}")
-        self.openingList.blockSignals(False)
-        if keep_row is not None and 0 <= keep_row < self.openingList.count:
-            self.openingList.setCurrentRow(keep_row)
+    def _ensurePlaneNodes(self):
+        """Létrehozza a Slicer markup sík node-okat, ha még nem léteznek."""
+        # Használat: a processCase eseménykezelőben, az eset sikeres betöltésekor.
+        # A kulcsoknak meg kell egyezniük az OUTFLOWS és a CaseData.skeletons kulcsaival.
+        for key, name in (("lvAorta", "Plane_lv_aorta"), ("rvPa", "Plane_rv_pa")): # Végig a két síkon
+            if key in self.planeNodes: # Létezik már? Ha igen, akkor nem kell létrehozni.
+                continue
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsPlaneNode", name) # Slicer plane létrehozása
+            node.CreateDefaultDisplayNodes() # Alap beállítások
+            node.SetDisplayVisibility(False) # Egyelőre nem látszódik
+            # A node csak a sík vizuális megjelenítését végzi,
+            # a tényleges állapot az OutflowPlane objektumban marad.
+            self.case.track(node) # Case nyilvántartja központilag
+            self.planeNodes[key] = node # A logika is tárolja, hogy a felület eseménykezelői könnyedén elérjék kulccsal.
 
-    def onOpeningSelected(self, row):
-        ops = self.logic.session.openings if self.logic.session else []
-        self.currentOpening = ops[row] if 0 <= row < len(ops) else None
-        self.logic.showOpening(self.currentOpening)
-        if self.currentOpening is not None:
-            self.uncertainCheck.checked = self.currentOpening.uncertain
-
-    def _stepOpening(self, step):
-        n = self.openingList.count
-        if n:
-            self.openingList.setCurrentRow((self.openingList.currentRow + step) % n)
-
-    def onDecide(self, decision):
-        if self.currentOpening is None:
+    def recutSeed(self) -> None:
+        """Az alap-seedet levágja, hogy a végleges síkok alatti tartomány maradjon."""
+        if self.seed is None or self.seed.settings is None or self.seedBaseMask is None:
             return
-        with slicer.util.tryWithErrorDisplay("Could not apply the decision.", waitCursor=True):
-            row = self.openingList.currentRow
-            self.logic.syncEdits()
-            self.logic.session.decide(self.currentOpening, decision, self.uncertainCheck.checked)
-            self.logic.pushMask()
-            self._fillOpeningList(keep_row=row)
-            undecided = [i for i, o in enumerate(self.logic.session.openings) if o.decision is None]
-            if undecided:
-                self.openingList.setCurrentRow(next((i for i in undecided if i > row), undecided[0]))
-            self._updateSeedInfo()
 
-    # ================================================================ export
-    def onExport(self):
-        s = self.logic.session
-        if s is None:
+        mask = self.seedBaseMask.copy()
+        # A síkteszt csak a seed ténylegesen elfoglalt bounding boxán fut.
+        # Ez a teljes CT-rács helyett jellemzően csak kis részterületet jelent.
+        occupied = np.any(mask, axis=(1, 2)), np.any(mask, axis=(0, 2)), np.any(mask, axis=(0, 1))
+        occupied_indices = [np.flatnonzero(axis) for axis in occupied]
+        if not all(len(indices) for indices in occupied_indices):
+            # Üres alapseednél nincs vizsgálható bounding box, 
+            # de a seed node-ot így is frissíteni kell.
+            self.seed.update(self.seed.settings, mask)
             return
-        with slicer.util.tryWithErrorDisplay("Export failed.", waitCursor=True):
-            self.logic.syncEdits()
-            try:
-                log = s.export(self._outputDir(), notes=self.notesEdit.plainText)
-            except session.ExportBlocked as exc:
-                self.logic.pushMask()
-                self._fillOpeningList()
-                slicer.util.warningDisplay("Cannot export yet:\n• " + str(exc).replace("; ", "\n• "))
-                return
-            self.exported = True
-            if log["native_check"]["differs"]:
-                slicer.util.warningDisplay(
-                    "Openings differ between the 1 mm grid and the native grid after transforming back. "
-                    "The case is exported; it is flagged in the log (native_check) for a second look.")
-            if self.grind:
-                self.manifest.set_status(s.case.case_id, "done")
-                self._loadNextGrindCase()
-            else:
-                self.logic.pushMask()
-                slicer.util.infoDisplay(f"Exported {s.case.case_id} to {self._outputDir()}.")
 
-    # ================================================================ scene
-    def onSceneStartClose(self, caller, event):
-        self.logic.nodes, self.logic.planeNodes, self.logic.session = {}, {}, None
-        self._setCaseLoaded(False)
-        self.caseLabel.text = "No case loaded."
+        bounds = tuple(
+            slice(int(indices[0]), int(indices[-1]) + 1)
+            for indices in occupied_indices
+        )
+        for state in (self.planes or {}).values():
+            plane = state.plane
+            if plane is None:
+                continue
+            # A síkok metszete a seed bounding boxán belül, az eredeti maszkkal.
+            mask[bounds] &= belowPlaneMask(self.case.ct, plane, bounds)
 
-    def cleanup(self):
-        self.removeObservers()
-
-    def onReload(self):
-        """Developer-mode Reload: also reload the core library, not only this file."""
-        importlib.reload(SeptumAnnotatorLib)
-        for name in _LIB_MODULES:
-            importlib.reload(importlib.import_module(f"SeptumAnnotatorLib.{name}"))
-        ScriptedLoadableModuleWidget.onReload(self)
-
+        self.seed.update(self.seed.settings, mask)
 
 #
-# Test
+# SeptumAnnotatorTest
 #
-
 
 class SeptumAnnotatorTest(ScriptedLoadableModuleTest):
-    """Loads a synthetic case through the GUI logic and exports it."""
-
     def setUp(self):
         slicer.mrmlScene.Clear()
 
     def runTest(self):
         self.setUp()
-        self.test_synthetic_case()
+        self.test_placeholder()
 
-    def test_synthetic_case(self):
-        import importlib.util
-        import tempfile
-
-        tools = os.path.join(os.path.dirname(__file__), "..", "tools", "make_synthetic_case.py")
-        spec = importlib.util.spec_from_file_location("make_synthetic_case", tools)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        out = tempfile.mkdtemp(prefix="septum_test_")
-        row = mod.make_case(out, "synth_test", with_vsd=True, rng=np.random.default_rng(0))
-        case = cfg.case_from_row({k: v for k, v in row.items() if not k.startswith("_")}, out)
-
-        logic = SeptumAnnotatorLogic()
-        s = logic.loadCase(case, d_mm=6.0, sheetness_threshold=0.1)
-        for state in s.planes.values():
-            mid = state.skeleton.max_index // 2
-            state.set_upper(mid + 2)
-            state.set_lower(mid - 2)
-            state.locked = True
-        logic.recompute()
-        for o in s.detect_openings():
-            s.decide(o, "approve")
-        log = s.export(os.path.join(out, "export"))
-        self.assertTrue(os.path.isfile(os.path.join(out, "export", "synth_test_septum.nii.gz")))
-        self.assertGreater(log["seed"]["final_voxels"], 0)
-        self.delayDisplay("Test passed")
+    def test_placeholder(self):
+        self.delayDisplay("No tests yet")

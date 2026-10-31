@@ -4,19 +4,11 @@ set(MODULE_NAME SeptumAnnotator)
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
-  ${MODULE_NAME}Lib/__init__.py
-  ${MODULE_NAME}Lib/config.py
-  ${MODULE_NAME}Lib/imaging.py
-  ${MODULE_NAME}Lib/manifest.py
-  ${MODULE_NAME}Lib/openings.py
-  ${MODULE_NAME}Lib/planes.py
-  ${MODULE_NAME}Lib/seed.py
-  ${MODULE_NAME}Lib/session.py
   )
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
-  Resources/requirements.txt
+  Resources/UI/${MODULE_NAME}.ui
   )
 
 #-----------------------------------------------------------------------------
@@ -26,3 +18,14 @@ slicerMacroBuildScriptedModule(
   RESOURCES ${MODULE_PYTHON_RESOURCES}
   WITH_GENERIC_TESTS
   )
+
+#-----------------------------------------------------------------------------
+if(BUILD_TESTING)
+
+  # Register the unittest subclass in the main script as a ctest.
+  # Note that the test will also be available at runtime.
+  slicer_add_python_unittest(SCRIPT ${MODULE_NAME}.py)
+
+  # Additional build-time testing
+  add_subdirectory(Testing)
+endif()
