@@ -1,34 +1,12 @@
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import numpy as np
+from SeptumAnnotatorLib.geometry import Plane
+from SeptumAnnotatorLib.skeleton import Skeleton
 
-from SeptumAnnotatorLib.config import Skeleton
 
-@dataclass
-class Plane:
-    """Vágósík RAS-koordinátákban: egy pont és egy egységnormál."""
-    point: np.ndarray
-    normal: np.ndarray
+OUTFLOWS = ("lvAorta", "rvPa")
 
-    def tilted(self, a_deg: float, b_deg: float) -> "Plane":
-        """A sík normáljának megdöntött változatát adja vissza."""
-        # A sík pontja változatlan marad, csak az irányt meghatározó normált forgatjuk.
-        return Plane(self.point, rotateNormal(self.normal, a_deg, b_deg))
-          
-def rotateNormal(normal: np.ndarray, a_deg: float, b_deg: float) -> np.ndarray:
-    """A normált két, rá merőleges tengely körül dönti meg (Rodrigues-forgatás)."""
-    n = normal / np.linalg.norm(normal)
-    u = np.cross(n, np.eye(3)[np.argmin(np.abs(n))])
-    u /= np.linalg.norm(u)
-    v = np.cross(n, u)
-
-    def rot(vec, axis, deg):
-        t = np.deg2rad(deg)
-        return vec * np.cos(t) + np.cross(axis, vec) * np.sin(t) + axis * np.dot(axis, vec) * (1 - np.cos(t))
-
-    r = rot(rot(n, u, a_deg), v, b_deg)
-    return r / np.linalg.norm(r)
 
 @dataclass
 class OutflowPlane:
@@ -43,6 +21,7 @@ class OutflowPlane:
     Előnézeti sík sincs külön eltárolva; azt a widget a skeleton és a csúszka
     értékéből számítja ki.
     """
+
     skeleton: Optional[Skeleton]
     mode: str = "skeleton"  # "skeleton" | "free hand" | "no connection"
     upper: Optional[int] = None  # A felső határ, amelyet az annotáló beállított.
@@ -63,7 +42,7 @@ class OutflowPlane:
     def plane(self) -> Optional[Plane]:
         """A döntésből származó végleges sík, amely a seedet vágja.
 
-        A csúszka közbeni előnézet nem itt készül. 
+        A csúszka közbeni előnézet nem itt készül.
         return None azt jelenti, hogy az aktuális döntés alapján még nincs végleges vágósík.
         """
         if self.mode == "free hand":
@@ -100,7 +79,7 @@ class OutflowPlane:
             text = "Free-hand plane applied." if self.free_hand else "Drag the plane in the 3D view, then Apply."
         else:
             # lambda függvény a skeleton-indexek megjelenítésére, ha az adott határ nincs beállítva, akkor -, ha be van állítva, akkor a számát írja ki.
-            fmt = lambda v: "–" if v is None else f"{v}"
+            fmt = lambda value: "–" if value is None else f"{value}"
             text = f"upper {fmt(self.upper)} · lower {fmt(self.lower)} · GT {fmt(self.gt_index)}"
             if self.tilt is not None:
                 text += f" · tilt a {self.tilt[0]:.1f}°, b {self.tilt[1]:.1f}°"

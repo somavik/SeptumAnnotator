@@ -1,16 +1,25 @@
 import os
-from typing import Annotated
+import importlib
+import sys
 
-from scipy import ndimage
+# Fejlesztés: a modul újratöltésekor a Lib-et is töltsük újra (függőségi sorrendben).
+# -> Ha a Lib-ben változtatok, akkor elég a modult újratölteni, nem kell a Slicert újraindítani, hogy a változások érvényesüljenek.
+for _name in ("geometry", "labels", "skeleton", "outflow", "seed", "case", "scene"):
+    _module = sys.modules.get(f"SeptumAnnotatorLib.{_name}")
+    if _module is not None:
+        importlib.reload(_module)
 
-from SeptumAnnotatorLib.planes import OutflowPlane, Plane
-from SeptumAnnotatorLib.config import CaseData, REQUIRED_STRUCTURES, SeedData, SeedSettings, loadLabelConfig, Skeleton, convexHullMask
+from SeptumAnnotatorLib.geometry import Plane
+from SeptumAnnotatorLib.outflow import OutflowPlane
+from SeptumAnnotatorLib.labels import REQUIRED_STRUCTURES
+from SeptumAnnotatorLib.seed import SeedSettings, cutBelowPlanes
+from SeptumAnnotatorLib.case import CaseData
+from SeptumAnnotatorLib.scene import PlaneNodes, SeedData
 
 import slicer
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import *
 from slicer.util import VTKObservationMixin
-from slicer.parameterNodeWrapper import parameterNodeWrapper
 
 
 # Slicer újraindítás: slicer.util.reloadScriptedModule("SeptumAnnotator")
@@ -42,10 +51,6 @@ class SeptumAnnotator(ScriptedLoadableModule):
 # SeptumAnnotatorWidget
 #
 
-import qt, ctk, slicer
-from slicer.ScriptedLoadableModule import *
-from slicer.util import VTKObservationMixin
-
 # A combo boxban kiválasztott érték határozza meg, melyik panelcsoport látható.
 PLANE_WIDGETS = {
     "skeleton": {"IndexWidget", "TiltWidget"},
@@ -67,26 +72,6 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Tárolja, hogy az adott kiáramlási síknál éppen melyik határ keresése folyik
         self._searching = {o: None for o in OUTFLOWS} # pl.: "lvAorta": None | "upper" | "lower"
         # Így a program tudja, hogy melyik csúszka mozgatása mikor frissítse az előnézetet.
-        
-    def _setDefaultValues(self):
-        """
-        Beállítja a felület alapértelmezett teszt-útvonalait és állapotait
-        a gyorsabb tesztelés érdekében.
-        """
-        self.ui.ctPathLineEdit.currentPath = (
-            r"C:\Users\somas\Desktop\25262\Onlab\project_soveny\ImageCHD_dataset\fixed_headers\ct_1001\ct_1001_fixed_image.nii.gz"
-        )
-        self.ui.segmentationPathLineEdit.currentPath = (
-            r"C:\Users\somas\Desktop\25262\Onlab\project_soveny\ImageCHD_dataset\fixed_headers\ct_1001\ct_1001_fixed_label.nii.gz"
-        )
-        self.ui.labelConfigPathLineEdit.currentPath = r"C:\Users\somas\Desktop\a.json"
-        self.ui.lvAortaSkeletonPathLineEdit.currentPath = (
-            r"C:\Users\somas\Desktop\26271\szakgyak\generate_frame\frames\1_skeleton_lv_aorta.npz"
-        )
-        self.ui.rvPaSkeletonPathLineEdit.currentPath = (
-            r"C:\Users\somas\Desktop\26271\szakgyak\generate_frame\frames\1_skeleton_rv_pa.npz"
-        )
-        self.ui.caseIdLineEdit.text = "1"
 
     def setup(self):
         print("[DEBUG] Setting up the SeptumAnnotatorWidget...")
@@ -97,6 +82,15 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         
         # A .ui fájlban névvel rendelkező widgeteket automatikusan attribútumként tölti fel.
         self.ui = slicer.util.childWidgetVariables(uiWidget)
+
+        for path_picker, setting_key in (
+            (self.ui.ctPathLineEdit, "SeptumAnnotator/ctPath"),
+            (self.ui.segmentationPathLineEdit, "SeptumAnnotator/segmentationPath"),
+            (self.ui.labelConfigPathLineEdit, "SeptumAnnotator/labelConfigPath"),
+            (self.ui.lvAortaSkeletonPathLineEdit, "SeptumAnnotator/lvAortaSkeletonPath"),
+            (self.ui.rvPaSkeletonPathLineEdit, "SeptumAnnotator/rvPaSkeletonPath"),
+        ):
+            path_picker.settingKey = setting_key
 
         # Bekötjük a Slicer jelenetet
         uiWidget.setMRMLScene(slicer.mrmlScene)
@@ -117,7 +111,6 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.regionComboBox.currentIndexChanged.connect(self._updateSeedControls)
         self.ui.loadSeedButton.clicked.connect(self.onLoadSeedButton)
         self.ui.seedCollapsibleButton.enabled = False
-        self.ui.loadSeedButton.clicked.connect(self.onLoadSeedButton)
         self.ui.bandWidthSliderWidget.valueChanged.connect(self.onSeedParameterChanged)
         self.ui.regionComboBox.currentIndexChanged.connect(self.onSeedParameterChanged)
         self._updateSeedControls()
@@ -147,8 +140,6 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         
         self.ui.planesCollapsibleButton.enabled = False
         self.ui.planesCollapsibleButton.collapsed = True
-
-        self._setDefaultValues()  # Alapértelmezett teszt-értékek beállítása
 
     
     # --- CASE ESEMÉNYKEZELŐK ---
@@ -193,6 +184,7 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onLoadCaseButton(self) -> None:
         lv, rv = self._skeletonPaths()
         with slicer.util.tryWithErrorDisplay("Failed to process the case.", waitCursor=True):
+            slicer.mrmlScene.Clear() # A scene törlése
             self.logic.processCase(self.ui.ctPathLineEdit.currentPath,
                             self.ui.segmentationPathLineEdit.currentPath,
                             self.ui.labelConfigPathLineEdit.currentPath,
@@ -308,7 +300,7 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             else p.plane
         )
         
-        self.logic.showPlane(
+        self.logic.scene.showPlane(
             o,
             shown,
             freeHand=p.mode == "free hand",
@@ -322,7 +314,7 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Szabadkézi módhoz először biztosítunk egy kiinduló síkot, amit a felhasználó
         # a markup nézetben elmozdíthat.
         if mode == "free hand" and p.free_hand is None:
-            self.logic.placePlaneNode(
+            self.logic.scene.placePlaneNode(
                 o,
                 p.plane or self.logic.defaultPlane(o),
             )
@@ -370,7 +362,7 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def onFreeHandApply(self, o):
         """A Free-Hand Apply gomb eseménykezelője: a Slicer markup aktuális helyzetét végleges, RAS-alapú Plane-ként mentjük."""
-        self._plane(o).free_hand = self.logic.readPlaneNode(o)
+        self._plane(o).free_hand = self.logic.scene.readPlaneNode(o)
         self._planeChanged(o)
 
     def onLockToggled(self, o, checked):
@@ -393,68 +385,10 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
 
 import numpy as np
-from dataclasses import dataclass
 
-def lps_to_ras(v):
-    """LPS -> RAS koordináta transzformáció (X és Y tengely tükrözése)."""
-    return [-float(v[0]), -float(v[1]), float(v[2])]
-
-def _unit(v) -> np.ndarray:
-    v = np.asarray(v, dtype=float)
-    n = np.linalg.norm(v)
-    if n == 0:
-        raise ValueError("zero-length vector")
-    return v / n
-            
 #
 # SeptumAnnotatorLogic
 #
-
-def belowPlaneMask(volumeNode, plane: Plane, bounds=None) -> np.ndarray:
-    """Bool maszk (k, j, i) sorrendben: True a sík kamra felőli oldalán lévő voxeleknél.
-
-    Feltételezi, hogy plane.normal egységvektor, és az artéria felé mutat.
-    bounds: opcionális (k_slice, j_slice, i_slice), ekkor csak ezt a részt számolja 
-    és a kimenet alakja a bounds alakja.
-    """
-    import vtk
-
-    # Előjeles távolság egy x RAS pontra: d = (x - p) · n   (mm-ben, mert |n| = 1)
-    #   d = 0: a síkon,  d < 0: kamra felőli oldal,  d > 0: artéria felőli oldal.
-    #
-    # Egy voxel RAS pontja: x = M · v + t,  ahol v = (i, j, k),
-    #   M = matrix[:3, :3]  (IJK -> RAS forgatás és voxelméret),
-    #   t = matrix[:3, 3]   (a (0, 0, 0) voxel középpontjának RAS koordinátája).
-    #
-    # Behelyettesítve:  d = (M · v) · n + (t - p) · n
-    # Mivel (M · v) · n = v · (Mᵀ · n):
-    #   d = i·ci + j·cj + k·ck + constant,   ahol (ci, cj, ck) = Mᵀ · n.
-    # Ezért a síkérték három tengelyenkénti 1D tag összegeként számítható,
-    # és nem kell teljes 3D RAS-koordinátatömböket létrehozni.
-
-    ijk_to_ras = vtk.vtkMatrix4x4()
-    volumeNode.GetIJKToRASMatrix(ijk_to_ras)
-    matrix = slicer.util.arrayFromVTKMatrix(ijk_to_ras)
-    coefficients = matrix[:3, :3].T @ plane.normal       # (ci, cj, ck)
-    constant = (matrix[:3, 3] - plane.point) @ plane.normal
-
-    # A VTK dimenziói (i, j, k) sorrendűek, a numpy-maszk tengelyei (k, j, i).
-    ni, nj, nk = volumeNode.GetImageData().GetDimensions()
-    if bounds is None:
-        bounds = (slice(0, nk), slice(0, nj), slice(0, ni))
-    k_slice, j_slice, i_slice = bounds
-
-    # Abszolút indexekkel számolunk (nem a bounding boxhoz képest),
-    # ezért a constant a részterületen is ugyanaz. A konstanst egyszer, a k taghoz adjuk.
-    i = (np.arange(i_slice.start, i_slice.stop) * coefficients[0]).astype(np.float32)
-    j = (np.arange(j_slice.start, j_slice.stop) * coefficients[1]).astype(np.float32)
-    k = (np.arange(k_slice.start, k_slice.stop) * coefficients[2] + constant).astype(np.float32)
-
-    # Broadcasting: a három 1D tag (k, j, i) alakú tömbbé adódik össze, így minden voxelnél
-    # megkapjuk d-t. Pl. az i tag egy adott i indexnél minden j-re és k-ra ugyanaz.
-    # float32: a pontosan a síkon fekvő voxelek kerekítés miatt bármelyik oldalra kerülhetnek.
-    return (k[:, None, None] + j[None, :, None] + i[None, None, :]) <= 0
-
 
 class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
     case: CaseData
@@ -465,7 +399,7 @@ class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
         self.case = None
         self.seed = None
         self.planes = None
-        self.planeNodes = {} # A kiáramlási síkok markup-nodjainak tárolása, hogy a felhasználó által elmozdított síkokat is tudjuk olvasni.
+        self.scene = None
         self.seedBaseMask = None
         
     # --- CASE LOGIKA ---
@@ -493,9 +427,9 @@ class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
             outflow: OutflowPlane(skeleton=self.case.skeletons.get(outflow))
             for outflow in OUTFLOWS
         }
-        self.planeNodes = {}
+        self.scene = PlaneNodes(self.case)
         # A sík-node-ok csak egyszer jönnek létre az eset betöltésekor.
-        self._ensurePlaneNodes()
+        self.scene._ensurePlaneNodes()
         
         # Szegmensek megjelenítésének beállítása: 2D-ben 40% kitöltés, 60% kontúr, csak a kötelező struktúrák látszanak
         disp = self.case.segmentation.GetDisplayNode()
@@ -510,7 +444,7 @@ class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
         for outflow, name in (("lvAorta", "Skeleton_lv_aorta"), ("rvPa", "Skeleton_rv_pa")):
             skeleton = self.case.skeletons.get(outflow)
             if skeleton is not None:
-                self.case.track(self._addPolyline(name, skeleton.points))
+                self.case.track(self.scene._addPolyline(name, skeleton.points))
 
         # Slicer nézetek frissítése 
         slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
@@ -521,33 +455,6 @@ class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
         print(f"Case loaded: {os.path.basename(ct_path)} "
                      f"(Generate Skeletons: {generate_skeletons})")
         
-    def _addPolyline(self, name: str, points: np.ndarray):
-        """Kirajzolja a skeleton pontokat a 3D Slicer nézetébe sárga vonalként."""
-        import vtk
-        pts = vtk.vtkPoints()
-        for p in points:
-            pts.InsertNextPoint(p)
-            
-        line = vtk.vtkPolyLine()
-        line.GetPointIds().SetNumberOfIds(len(points))
-        for i in range(len(points)):
-            line.GetPointIds().SetId(i, i)
-            
-        cells = vtk.vtkCellArray()
-        cells.InsertNextCell(line)
-        
-        poly = vtk.vtkPolyData()
-        poly.SetPoints(pts)
-        poly.SetLines(cells)
-        
-        model = slicer.modules.models.logic().AddModel(poly)
-        model.SetName(name)
-        model.GetDisplayNode().SetColor(1, 1, 0)  # Sárga szín
-        model.GetDisplayNode().SetLineWidth(3)
-        model.GetDisplayNode().SetVisibility2D(True) # Jelenjen meg a 2D CT-ken is
-        
-        return model
-    
     # --- SEED LOGIKA ---S
 
     def generateSeed(self, settings: SeedSettings) -> None:
@@ -582,92 +489,16 @@ class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
             raise ValueError(f"No skeleton is available for {key}.")
         return skeleton.planeAt(skeleton.max_index)
     
-    def placePlaneNode(self, key, plane):
-        """A kapott Plane objektum alapján beállítja a Slicer markup node-ot"""
-        # Használat: az onModeChanged eseménykezlőben, a defaultPlane által visszaadott síkkal.
-        node = self.planeNodes[key]
-        node.SetCenterWorld(plane.point)
-        node.SetNormalWorld(plane.normal)
-        node.SetDisplayVisibility(True)
-        node.SetLocked(False)
-        
-    def readPlaneNode(self, key) -> Plane:
-        """A Slicer markup node-ot egy Plane objektummá alakítja."""
-        # Használat: az onFreeHandApply eseménykezelőben.
-        node = self.planeNodes[key]
-        point = np.zeros(3)
-        normal = np.zeros(3)
-        node.GetCenterWorld(point)
-        node.GetNormalWorld(normal)
-        return Plane(point, _unit(normal))
-    
-    def showPlane(self, o, plane, freeHand, locked):
-        """A markup sík node-ot a megadott síkra állítja, és a felhasználói interakciót engedélyezi vagy tiltja."""
-        # Használat: az összes plane eseménykezelőben.
-        node = self.planeNodes[o]
-        userControls = freeHand and not locked
-        # Szabadkézi, feloldott módban a user mozgathatja a node-ot,
-        # más esetben a node-ot a modell által számított síkkal szinkronizáljuk.
-        if not userControls:  # zárolt szabadkézi síknál is: a látott sík legyen a használt sík
-            if plane is None:
-                node.SetDisplayVisibility(False)
-            else:
-                node.SetCenterWorld(plane.point)
-                node.SetNormalWorld(plane.normal)
-                node.SetDisplayVisibility(True)
-        else:
-            node.SetDisplayVisibility(True)
-        node.SetLocked(not userControls)
-        displayNode = node.GetDisplayNode()
-        # Free-hand módban azonnal látszódjanak a forgató és mozgató handle-ek.
-        displayNode.SetHandlesInteractive(userControls)
-        displayNode.SetRotationHandleVisibility(userControls)
-        displayNode.SetTranslationHandleVisibility(userControls)
-        displayNode.SetScaleHandleVisibility(False)  # a méret nem befolyásolja a vágást
-
-    def _ensurePlaneNodes(self):
-        """Létrehozza a Slicer markup sík node-okat, ha még nem léteznek."""
-        # Használat: a processCase eseménykezelőben, az eset sikeres betöltésekor.
-        # A kulcsoknak meg kell egyezniük az OUTFLOWS és a CaseData.skeletons kulcsaival.
-        for key, name in (("lvAorta", "Plane_lv_aorta"), ("rvPa", "Plane_rv_pa")): # Végig a két síkon
-            if key in self.planeNodes: # Létezik már? Ha igen, akkor nem kell létrehozni.
-                continue
-            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsPlaneNode", name) # Slicer plane létrehozása
-            node.CreateDefaultDisplayNodes() # Alap beállítások
-            node.SetDisplayVisibility(False) # Egyelőre nem látszódik
-            # A node csak a sík vizuális megjelenítését végzi,
-            # a tényleges állapot az OutflowPlane objektumban marad.
-            self.case.track(node) # Case nyilvántartja központilag
-            self.planeNodes[key] = node # A logika is tárolja, hogy a felület eseménykezelői könnyedén elérjék kulccsal.
-
     def recutSeed(self) -> None:
         """Az alap-seedet levágja, hogy a végleges síkok alatti tartomány maradjon."""
         if self.seed is None or self.seed.settings is None or self.seedBaseMask is None:
             return
 
-        mask = self.seedBaseMask.copy()
-        # A síkteszt csak a seed ténylegesen elfoglalt bounding boxán fut.
-        # Ez a teljes CT-rács helyett jellemzően csak kis részterületet jelent.
-        occupied = np.any(mask, axis=(1, 2)), np.any(mask, axis=(0, 2)), np.any(mask, axis=(0, 1))
-        occupied_indices = [np.flatnonzero(axis) for axis in occupied]
-        if not all(len(indices) for indices in occupied_indices):
-            # Üres alapseednél nincs vizsgálható bounding box, 
-            # de a seed node-ot így is frissíteni kell.
-            self.seed.update(self.seed.settings, mask)
-            return
-
-        bounds = tuple(
-            slice(int(indices[0]), int(indices[-1]) + 1)
-            for indices in occupied_indices
+        planes = [state.plane for state in (self.planes or {}).values() if state.plane is not None]
+        self.seed.update(
+            self.seed.settings,
+            cutBelowPlanes(self.seedBaseMask, self.case.ijkToRas(), planes),
         )
-        for state in (self.planes or {}).values():
-            plane = state.plane
-            if plane is None:
-                continue
-            # A síkok metszete a seed bounding boxán belül, az eredeti maszkkal.
-            mask[bounds] &= belowPlaneMask(self.case.ct, plane, bounds)
-
-        self.seed.update(self.seed.settings, mask)
 
 #
 # SeptumAnnotatorTest

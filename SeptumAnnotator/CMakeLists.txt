@@ -4,6 +4,14 @@ set(MODULE_NAME SeptumAnnotator)
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
+  SeptumAnnotatorLib/__init__.py
+  SeptumAnnotatorLib/case.py
+  SeptumAnnotatorLib/geometry.py
+  SeptumAnnotatorLib/labels.py
+  SeptumAnnotatorLib/seed.py
+  SeptumAnnotatorLib/skeleton.py
+  SeptumAnnotatorLib/outflow.py
+  SeptumAnnotatorLib/scene.py
   )
 
 set(MODULE_PYTHON_RESOURCES
