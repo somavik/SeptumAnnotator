@@ -10,11 +10,11 @@ for _name in ("geometry", "labels", "skeleton", "outflow", "seed", "case", "scen
         importlib.reload(_module)
 
 from SeptumAnnotatorLib.geometry import Plane
-from SeptumAnnotatorLib.outflow import OutflowPlane
+from SeptumAnnotatorLib.outflow import OutflowPlane, OUTFLOWS
 from SeptumAnnotatorLib.labels import REQUIRED_STRUCTURES
 from SeptumAnnotatorLib.seed import SeedSettings, cutBelowPlanes
 from SeptumAnnotatorLib.case import CaseData
-from SeptumAnnotatorLib.scene import PlaneNodes, SeedData
+from SeptumAnnotatorLib.scene import PlaneNodes, SeptumData
 
 import slicer
 from slicer.i18n import tr as _
@@ -58,7 +58,6 @@ PLANE_WIDGETS = {
     "no connection": set(),
 }
 # Ezekből állnak össze a konkrét UI-nevek.
-OUTFLOWS = ("lvAorta", "rvPa") # Prefix
 ALL_WIDGETS = ("IndexWidget", "TiltWidget", "FreeHandWidget") # Konkrét widgetek, amik a fenti dict-ben szerepelnek.
 
 class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
@@ -72,6 +71,26 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Tárolja, hogy az adott kiáramlási síknál éppen melyik határ keresése folyik
         self._searching = {o: None for o in OUTFLOWS} # pl.: "lvAorta": None | "upper" | "lower"
         # Így a program tudja, hogy melyik csúszka mozgatása mikor frissítse az előnézetet.
+        
+    def _setDefaultValues(self):
+        """
+        Beállítja a felület alapértelmezett teszt-útvonalait és állapotait
+        a gyorsabb tesztelés érdekében.
+        """
+        self.ui.ctPathLineEdit.currentPath = (
+            r"C:\Users\somas\Desktop\25262\Onlab\project_soveny\ImageCHD_dataset\fixed_headers\ct_1001\ct_1001_fixed_image.nii.gz"
+        )
+        self.ui.segmentationPathLineEdit.currentPath = (
+            r"C:\Users\somas\Desktop\25262\Onlab\project_soveny\ImageCHD_dataset\fixed_headers\ct_1001\ct_1001_fixed_label.nii.gz"
+        )
+        self.ui.labelConfigPathLineEdit.currentPath = r"C:\Users\somas\Desktop\a.json"
+        self.ui.lvAortaSkeletonPathLineEdit.currentPath = (
+            r"C:\Users\somas\Desktop\26271\szakgyak\generate_frame\frames\1_skeleton_lv_aorta.npz"
+        )
+        self.ui.rvPaSkeletonPathLineEdit.currentPath = (
+            r"C:\Users\somas\Desktop\26271\szakgyak\generate_frame\frames\1_skeleton_rv_pa.npz"
+        )
+        self.ui.caseIdLineEdit.text = "1"
 
     def setup(self):
         print("[DEBUG] Setting up the SeptumAnnotatorWidget...")
@@ -83,14 +102,14 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # A .ui fájlban névvel rendelkező widgeteket automatikusan attribútumként tölti fel.
         self.ui = slicer.util.childWidgetVariables(uiWidget)
 
-        for path_picker, setting_key in (
-            (self.ui.ctPathLineEdit, "SeptumAnnotator/ctPath"),
-            (self.ui.segmentationPathLineEdit, "SeptumAnnotator/segmentationPath"),
-            (self.ui.labelConfigPathLineEdit, "SeptumAnnotator/labelConfigPath"),
-            (self.ui.lvAortaSkeletonPathLineEdit, "SeptumAnnotator/lvAortaSkeletonPath"),
-            (self.ui.rvPaSkeletonPathLineEdit, "SeptumAnnotator/rvPaSkeletonPath"),
-        ):
-            path_picker.settingKey = setting_key
+        # for path_picker, setting_key in (
+        #     (self.ui.ctPathLineEdit, "SeptumAnnotator/ctPath"),
+        #     (self.ui.segmentationPathLineEdit, "SeptumAnnotator/segmentationPath"),
+        #     (self.ui.labelConfigPathLineEdit, "SeptumAnnotator/labelConfigPath"),
+        #     (self.ui.lvAortaSkeletonPathLineEdit, "SeptumAnnotator/lvAortaSkeletonPath"),
+        #     (self.ui.rvPaSkeletonPathLineEdit, "SeptumAnnotator/rvPaSkeletonPath"),
+        # ):
+        #     path_picker.settingKey = setting_key
 
         # Bekötjük a Slicer jelenetet
         uiWidget.setMRMLScene(slicer.mrmlScene)
@@ -109,7 +128,7 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Eseménykezelők bekötése (Seed)
         self.ui.seedStrategyComboBox.currentIndexChanged.connect(self._updateSeedControls)
         self.ui.regionComboBox.currentIndexChanged.connect(self._updateSeedControls)
-        self.ui.loadSeedButton.clicked.connect(self.onLoadSeedButton)
+        self.ui.loadSeedButton.clicked.connect(lambda: self.onLoadSeed(resetEdits=True))
         self.ui.seedCollapsibleButton.enabled = False
         self.ui.bandWidthSliderWidget.valueChanged.connect(self.onSeedParameterChanged)
         self.ui.regionComboBox.currentIndexChanged.connect(self.onSeedParameterChanged)
@@ -133,6 +152,19 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._w(outflow, "ApplyMarkupPlaneButton").clicked.connect(lambda *_, o=outflow: self.onFreeHandApply(o))
             self._w(outflow, "LockCheckBox").toggled.connect(lambda checked, o=outflow: self.onLockToggled(o, checked))
         
+        # Eseménykezelők bekötése (Connections)
+        self.editor = self.ui.correctionSegmentEditorWidget
+        self.editor.setMRMLScene(slicer.mrmlScene)
+        # Egy editor node elég; újratöltéskor a meglévőt használjuk újra.
+        self.editorNode = slicer.mrmlScene.GetFirstNodeByName("SeptumAnnotatorEditor") or \
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentEditorNode", "SeptumAnnotatorEditor")
+        self.editor.setMRMLSegmentEditorNode(self.editorNode)  # enélkül az editor inaktív marad
+        self.editor.setEffectNameOrder(["Islands", "Erase", "Paint", "Smoothing", "Scissors"])
+        self.editor.unorderedEffectsVisible = False  # csak a felsorolt effektek látszanak
+        
+        # Eseménykezelők bekötése (Export)
+        self.ui.exportPushButton.clicked.connect(self.onExportClicked)
+
         self.ui.caseCollapsibleButton.collapsed = False
         
         self.ui.seedCollapsibleButton.enabled = False
@@ -140,6 +172,20 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         
         self.ui.planesCollapsibleButton.enabled = False
         self.ui.planesCollapsibleButton.collapsed = True
+        
+        self.ui.correctionCollapsibleButton.enabled = False 
+        self.ui.correctionCollapsibleButton.collapsed = True
+        
+        self.ui.exportPushButton.enabled = False
+        
+        self._setDefaultValues()
+
+    def cleanup(self):
+        """Újratöltéskor és kilépéskor fut: az eset node-jait töröljük,
+        különben az új logic nem tudna róluk, és a jelenetben maradnának."""
+        if self.logic is not None and self.logic.case is not None:
+            self.logic.case.removeNodes()
+        self.removeObservers()
 
     
     # --- CASE ESEMÉNYKEZELŐK ---
@@ -164,6 +210,7 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _skeletonPaths(self):
         """(lv, rv) útvonalak, vagy (None, None), ha generálunk."""
+        print(f"[DEBUG] Checking skeleton paths: generateSkeleton={self.ui.generateSkeletonCheckBox.checked}, lvPath={self.ui.lvAortaSkeletonPathLineEdit.currentPath}, rvPath={self.ui.rvPaSkeletonPathLineEdit.currentPath}")
         if self.ui.generateSkeletonCheckBox.checked:
             return None, None
         return (self.ui.lvAortaSkeletonPathLineEdit.currentPath,
@@ -182,9 +229,9 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                                     else "Missing: " + ", ".join(missing))
 
     def onLoadCaseButton(self) -> None:
+        print("[DEBUG] Loading case with parameters: ctPath={self.ui.ctPathLineEdit.currentPath}, segmentationPath={self.ui.segmentationPathLineEdit.currentPath}, labelConfigPath={self.ui.labelConfigPathLineEdit.currentPath}, generateSkeletons={self.ui.generateSkeletonCheckBox.checked}, caseId={self.ui.caseIdLineEdit.text}")
         lv, rv = self._skeletonPaths()
         with slicer.util.tryWithErrorDisplay("Failed to process the case.", waitCursor=True):
-            slicer.mrmlScene.Clear() # A scene törlése
             self.logic.processCase(self.ui.ctPathLineEdit.currentPath,
                             self.ui.segmentationPathLineEdit.currentPath,
                             self.ui.labelConfigPathLineEdit.currentPath,
@@ -199,11 +246,10 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # --- SEED ESEMÉNYKEZELŐK ---
         
     def onSeedParameterChanged(self, *args):
-        seed = self.logic.seed
-        if seed is None or seed.settings is None:  # még nem nyomták meg a Load Seed-et
+        septum = self.logic.septum
+        if septum is None:  # még nem nyomták meg a Load Seed-et
             return
-        print(f"[DEBUG] Seed parameters changed: bandWidth={self.ui.bandWidthSliderWidget.value}, region={self.ui.regionComboBox.currentText}")
-        self.onLoadSeedButton()
+        self.onLoadSeed(resetEdits=False)
     
     def _seedOptions(self):
         """(strategy, region) a jelenlegi UI-állapotból. Sheetness esetén mindig band."""
@@ -222,7 +268,11 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.bandWidthSliderWidget.enabled = region == "band"
         self.ui.thresholdSliderWidget.enabled = strategy == "sheetness"
             
-    def onLoadSeedButton(self) -> None:
+    def onLoadSeed(self, resetEdits: bool = False) -> None:
+        septum = self.logic.septum
+        if resetEdits and septum.hasEdits():
+            if not slicer.util.confirmYesNoDisplay("Reloading the seed discards your corrections. Continue?"):
+                return
         strategy, region = self._seedOptions()
         with slicer.util.tryWithErrorDisplay("Failed to generate the seed.", waitCursor=True):
             self.logic.generateSeed(SeedSettings(
@@ -230,9 +280,20 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 region=region,
                 d_mm=self.ui.bandWidthSliderWidget.value,
                 threshold=self.ui.thresholdSliderWidget.value,
-            ))
-            self.ui.planesCollapsibleButton.enabled = True
-            self.ui.planesCollapsibleButton.collapsed = False
+            ), 
+                resetEdits=resetEdits)
+            if resetEdits:  # csak a gombnál
+                self.ui.planesCollapsibleButton.enabled = True
+                self.ui.planesCollapsibleButton.collapsed = False
+            
+            self.ui.correctionCollapsibleButton.enabled = True  
+            self.ui.correctionCollapsibleButton.collapsed = False
+            self.editor.setSegmentationNode(self.logic.septum.node)
+            self.editor.setSourceVolumeNode(self.logic.case.ct)
+            self.editor.setCurrentSegmentID(self.logic.septum.segmentId)
+            
+            self.ui.exportPushButton.enabled = True
+            
     
     # --- PLANE ESEMÉNYKEZELŐK ---
     
@@ -381,7 +442,42 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Minden végleges módosítás után a seedet minden aktív sík metszetével frissítjük.
         self.logic.recutSeed()  # seed = alap ∩ minden végleges sík alatti tartomány
         self._refresh(o)
+    
+    # --- EXPORT ESEMÉNYKEZELŐK ---
+    
+    def onExportClicked(self):
+        """Az export gomb eseménykezelője: elmenti a szeptumot a felhasználó által kiválasztott útvonalra."""
+        if not self.logic.case or not self.logic.septum:
+            return
 
+        # Kézi szerkesztések érvényesítése 
+        self.logic.septum.syncEdits()
+
+        case_id = self.logic.case.case_id or "unknown"
+        output_dir = os.path.join(os.getcwd(), "output")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        file_path = os.path.join(output_dir, f"septum_{case_id}.nii.gz")
+
+        with slicer.util.tryWithErrorDisplay("Failed to export septum.", waitCursor=True):
+            # 2. Szegmentáció konvertálása LabelMap-pé a biztonságos NIfTI mentéshez
+            temp_labelmap = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "temp_export")
+            slicer.modules.segmentations.logic().ExportVisibleSegmentsToLabelmapNode(
+                self.logic.septum.node, 
+                temp_labelmap, 
+                self.logic.case.ct  # A CT biztosítja a rácsot és a pontos NIfTI fejlécet
+            )
+
+            # Fájl kimentése a háttértárra
+            success = slicer.util.saveNode(temp_labelmap, filename=file_path)
+            
+            # Ideiglenes csomópont feltakarítása a memóriából
+            slicer.mrmlScene.RemoveNode(temp_labelmap)
+
+            if success:
+                slicer.util.infoDisplay(f"Septum exported to {file_path}.")
+            else:
+                slicer.util.errorDisplay("Mentés nem sikerült a Slicer saveNode hívásakor.")
 
 
 import numpy as np
@@ -392,21 +488,19 @@ import numpy as np
 
 class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
     case: CaseData
-    seed: SeedData
+    septum: SeptumData
     
     def __init__(self) -> None:
         ScriptedLoadableModuleLogic.__init__(self)
         self.case = None
-        self.seed = None
+        self.septum = None
         self.planes = None
-        self.scene = None
-        self.seedBaseMask = None
-        
+        self.scene = None        
     # --- CASE LOGIKA ---
 
     def processCase(self, ct_path: str, segmentation_path: str, label_config_path: str, lv_skel: str, rv_skel: str, generate_skeletons: bool, case_id : str = "") -> None:
         """Betölti a CT-t és a szegmentációt, és megjeleníti őket."""
-        
+        print(f"[DEBUG] Processing case: ct_path={ct_path}, segmentation_path={segmentation_path}, label_config_path={label_config_path}, lv_skel={lv_skel}, rv_skel={rv_skel}, generate_skeletons={generate_skeletons}, case_id={case_id}")
         new_case  = CaseData(case_id=case_id or os.path.basename(ct_path),
                                ct_path=ct_path,
                                seg_path=segmentation_path,
@@ -418,10 +512,9 @@ class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
         if self.case is not None:  # az előző esetet csak sikeres betöltés után dobjuk el
             self.case.removeNodes()
         self.case = new_case
-        self.seed = SeedData(self.case)  # egy seed esetenként
+        self.septum = SeptumData(self.case)  # egy seed esetenként
         # A síkállapot az esethez tartozik, ezért seed-paraméter módosításakor
         # nem szabad új OutflowPlane objektumokkal felülírni.
-        self.seedBaseMask = None
         # Minden kiáramlási szekció saját, tartós döntési állapotot kap.
         self.planes = {
             outflow: OutflowPlane(skeleton=self.case.skeletons.get(outflow))
@@ -455,25 +548,21 @@ class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
         print(f"Case loaded: {os.path.basename(ct_path)} "
                      f"(Generate Skeletons: {generate_skeletons})")
         
-    # --- SEED LOGIKA ---S
+    # --- SEED LOGIKA ---
 
-    def generateSeed(self, settings: SeedSettings) -> None:
+    def generateSeed(self, settings: SeedSettings, resetEdits: bool) -> None:
         if settings.strategy == "myocardium":
-            base = self.case.mask("myo")   # tárolt
+            strategy = self.case.mask("myo")   # tárolt
             region = self.case.hull() if settings.region == "hull" else self._band(settings.d_mm)
-            mask = base & region
+            base = strategy & region
         elif settings.strategy == "sheetness":
-            base = self.case.sheetness() > settings.threshold       # a térkép tárolt, a küszöb gyors
-            mask = base & self._band(settings.d_mm)
+            strategy = self.case.sheetness() > settings.threshold       # a térkép tárolt, a küszöb gyors
+            base = strategy & self._band(settings.d_mm)
         else:
             raise ValueError(f"Unknown seed strategy: {settings.strategy}")
-        # Ezt a síkoktól függetlenül megőrizzük, hogy minden újravágás innen
-        # induljon, ne az előző vágás eredményét vágjuk tovább.
-        self.seedBaseMask = mask
         
-        # A már beállított síkokat változatlanul hagyjuk, és az új alapmaszkot
-        # ugyanazokkal a síkokkal vágjuk újra.
-        self.seed.settings = settings
+        self.septum.setBase(base, resetEdits=resetEdits)
+        
         self.recutSeed()
     
     def _band(self, d_mm: float) -> np.ndarray:
@@ -491,15 +580,13 @@ class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
     
     def recutSeed(self) -> None:
         """Az alap-seedet levágja, hogy a végleges síkok alatti tartomány maradjon."""
-        if self.seed is None or self.seed.settings is None or self.seedBaseMask is None:
+        if self.septum  is None or self.septum.base is None:
             return
+        
+        self.septum.syncEdits()
 
-        planes = [state.plane for state in (self.planes or {}).values() if state.plane is not None]
-        self.seed.update(
-            self.seed.settings,
-            cutBelowPlanes(self.seedBaseMask, self.case.ijkToRas(), planes),
-        )
-
+        planes = [p.plane for p in self.planes.values() if p.plane is not None]
+        self.septum.compose(self.case.ijkToRas(), planes)
 #
 # SeptumAnnotatorTest
 #

@@ -9,7 +9,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>836</width>
+    <width>677</width>
     <height>1111</height>
    </rect>
   </property>
@@ -262,6 +262,9 @@
     <widget class="ctkCollapsibleButton" name="planesCollapsibleButton">
      <property name="text">
       <string>Planes</string>
+     </property>
+     <property name="collapsed">
+      <bool>true</bool>
      </property>
      <property name="contentsFrameShape">
       <enum>QFrame::StyledPanel</enum>
@@ -689,6 +692,31 @@
     </widget>
    </item>
    <item>
+    <widget class="ctkCollapsibleButton" name="correctionCollapsibleButton">
+     <property name="text">
+      <string>Correction</string>
+     </property>
+     <property name="contentsFrameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <layout class="QVBoxLayout" name="verticalLayout">
+      <item>
+       <widget class="qMRMLSegmentEditorWidget" name="correctionSegmentEditorWidget">
+        <property name="sourceVolumeNodeSelectorVisible">
+         <bool>false</bool>
+        </property>
+        <property name="autoShowSourceVolumeNode">
+         <bool>false</bool>
+        </property>
+        <property name="defaultTerminologyEntrySettingsKey">
+         <string notr="true"/>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Vertical</enum>
@@ -700,6 +728,13 @@
       </size>
      </property>
     </spacer>
+   </item>
+   <item>
+    <widget class="QPushButton" name="exportPushButton">
+     <property name="text">
+      <string>Export</string>
+     </property>
+    </widget>
    </item>
   </layout>
  </widget>
@@ -735,6 +770,11 @@
    <extends>QWidget</extends>
    <header>qMRMLWidget.h</header>
    <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>qMRMLSegmentEditorWidget</class>
+   <extends>qMRMLWidget</extends>
+   <header>qMRMLSegmentEditorWidget.h</header>
   </customwidget>
  </customwidgets>
  <resources/>

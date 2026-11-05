@@ -4,16 +4,18 @@ import numpy as np
 import slicer
 
 from SeptumAnnotatorLib.geometry import Plane, unit
-from SeptumAnnotatorLib.seed import SeedSettings
+from SeptumAnnotatorLib.seed import SeedSettings, cutBelowPlanes
 
 
-class SeedData:
-    """Egy eset seedje: beállítások, eredmény-maszk és a megjelenítő node."""
+class SeptumData:
+    """Egy eset septum maszkja: karbantartott maszk, base, added, removed és a megjelenítő node."""
 
     def __init__(self, case):
         self.case = case
-        self.settings = None
         self.mask = None
+        self.added = None
+        self.removed = None
+        self.base = None
         self.node = case.track(slicer.mrmlScene.AddNewNodeByClass(
             "vtkMRMLSegmentationNode", f"{case.case_id}_seed"))  # a case takarítja
         self.node.SetReferenceImageGeometryParameterFromVolumeNode(case.ct)
@@ -21,12 +23,40 @@ class SeedData:
         self.node.GetDisplayNode().SetOpacity2DFill(0.5)
         self.segmentId = self.node.GetSegmentation().AddEmptySegment("seed", "seed", (0.2, 0.9, 0.3))
 
-    def update(self, settings: SeedSettings, mask: np.ndarray) -> None:
-        self.settings, self.mask = settings, mask
-        slicer.util.updateSegmentBinaryLabelmapFromArray(
-            mask.astype(np.uint8), self.node, self.segmentId, self.case.ct)
-        self.node.CreateClosedSurfaceRepresentation()  # minden frissítés után kell
+    def hasEdits(self) -> bool:
+        print("hasEdits: added.any() =", self.added.any() if self.added is not None else None,
+              "removed.any() =", self.removed.any() if self.removed is not None else None)
+        self.syncEdits()  # a még nem szinkronizált festést is számoljuk
+        return self.mask is not None and bool(self.added.any() or self.removed.any())
 
+    def setBase(self, base: np.ndarray, resetEdits: bool) -> None:
+        """Csak tárol: új alap-seed, a szerkesztések megtartásával vagy törlésével."""
+        self.base = base
+        if resetEdits or self.added is None:
+            self.added = np.zeros(base.shape, dtype=bool)
+            self.removed = np.zeros(base.shape, dtype=bool)
+            self.mask = None
+        else:
+            self.syncEdits()
+            
+    def syncEdits(self) -> None:
+        """A node és a legutóbb kiírt eredmény különbsége = a felhasználó szerkesztései."""
+        if self.mask is None:
+            return
+        current = slicer.util.arrayFromSegmentBinaryLabelmap(self.node, self.segmentId, self.case.ct) > 0
+        painted, erased = current & ~self.mask, self.mask & ~current
+        self.added = (self.added | painted) & ~erased
+        self.removed = (self.removed | erased) & ~painted
+    
+    def compose(self, ijk_to_ras, planes) -> None:
+        """Eredmény = síkokkal vágva ((base ∪ added) ∖ removed); a node-ba is kiírja."""
+        self.mask = cutBelowPlanes((self.base | self.added) & ~self.removed, ijk_to_ras, planes)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(
+            self.mask.astype(np.uint8), self.node, self.segmentId, self.case.ct)
+        self.node.CreateClosedSurfaceRepresentation()
+
+
+    
 
 class PlaneNodes:
     def __init__(self, case):
