@@ -239,15 +239,22 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                             generate_skeletons=self.ui.generateSkeletonCheckBox.checked,
                             case_id=self.ui.caseIdLineEdit.text)
             self._initPlaneControls()
-            self.ui.planesCollapsibleButton.enabled = False
             self.ui.seedCollapsibleButton.enabled = True
             self.ui.seedCollapsibleButton.collapsed = False
+            
+            self.ui.planesCollapsibleButton.enabled = False
+            self.ui.planesCollapsibleButton.collapsed = True
+                    
+            self.ui.correctionCollapsibleButton.enabled = False 
+            self.ui.correctionCollapsibleButton.collapsed = True
+                    
+            self.ui.exportPushButton.enabled = False
         
     # --- SEED ESEMÉNYKEZELŐK ---
         
     def onSeedParameterChanged(self, *args):
         septum = self.logic.septum
-        if septum is None:  # még nem nyomták meg a Load Seed-et
+        if septum is None or septum.base is None:  # még nem nyomták meg a Load Seed-et
             return
         self.onLoadSeed(resetEdits=False)
     
@@ -454,7 +461,7 @@ class SeptumAnnotatorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.logic.septum.syncEdits()
 
         case_id = self.logic.case.case_id or "unknown"
-        output_dir = os.path.join(os.getcwd(), "output")
+        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
         os.makedirs(output_dir, exist_ok=True)
         
         file_path = os.path.join(output_dir, f"septum_{case_id}.nii.gz")
@@ -501,7 +508,7 @@ class SeptumAnnotatorLogic(ScriptedLoadableModuleLogic):
     def processCase(self, ct_path: str, segmentation_path: str, label_config_path: str, lv_skel: str, rv_skel: str, generate_skeletons: bool, case_id : str = "") -> None:
         """Betölti a CT-t és a szegmentációt, és megjeleníti őket."""
         print(f"[DEBUG] Processing case: ct_path={ct_path}, segmentation_path={segmentation_path}, label_config_path={label_config_path}, lv_skel={lv_skel}, rv_skel={rv_skel}, generate_skeletons={generate_skeletons}, case_id={case_id}")
-        new_case  = CaseData(case_id=case_id or os.path.basename(ct_path),
+        new_case  = CaseData(case_id=case_id or os.path.basename(ct_path).split(".")[0],
                                ct_path=ct_path,
                                seg_path=segmentation_path,
                                label_config_path=label_config_path,
